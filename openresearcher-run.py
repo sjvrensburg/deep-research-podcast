@@ -245,14 +245,75 @@ def force_answer(messages):
     return "Automated research found no answer and no usable sources within its turn budget."
 
 
-def _emit(question, answer, turns_used, budget_spent, as_json):
+def enrich_question(question):
+    """Rewrite a possibly-sloppy input question into a precise research brief
+    before handing it to the agent loop.
+
+    Added 2026-08-18 after a real deep-research-podcast run: an open,
+    casually-phrased sub-question ("how does X compare to what other labs
+    have done") reliably let the agent take the easy path -- re-describing
+    background it had already read (the source document's own citations)
+    rather than actually finding and naming new material. That is not
+    force_answer()'s job to catch (the resulting prose was fluent and
+    non-repetitive, so `_is_degenerate()` correctly left it alone) -- the
+    question itself needed to demand more. This is exactly the gap between
+    "what a user types into a chat" and "what a research brief should say,"
+    and real callers (a Hermes skill decomposing a vague request, a human
+    typing a quick question) routinely produce the former. One cheap LLM
+    call up front, asking a model to restate the question with an explicit
+    bar for specificity, costs a few seconds and changes what "a natural
+    conclusion" is allowed to look like for everything downstream.
+
+    Best-effort: a failed enrichment call returns the original question
+    unchanged rather than blocking research on an LLM call that isn't the
+    point of the run.
+    """
+    msgs = [
+        {"role": "system", "content": (
+            "You rewrite research questions for an autonomous web-research agent. "
+            "The input question may be short, casual, or underspecified -- typical "
+            "of a real user's chat message, not a careful research brief. Rewrite it "
+            "into a precise, demanding research brief that:\n"
+            "1. Preserves the original question's intent and scope exactly -- do not "
+            "broaden, narrow, or change the topic.\n"
+            "2. If the question asks for a comparison, trend, or what has changed, "
+            "explicitly requires the agent to name specific papers, systems, "
+            "organizations, or people, with approximate dates -- general statements "
+            "without named specifics are not an acceptable answer.\n"
+            "3. Explicitly forbids treating background the question already assumes "
+            "is known (e.g. the subject's own well-known baseline comparisons) as if "
+            "restating it were a new finding.\n"
+            "Return ONLY the rewritten question/brief, 2-4 sentences, nothing else -- "
+            "no preamble, no explanation of what you changed."
+        )},
+        {"role": "user", "content": question},
+    ]
+    try:
+        content = chat(msgs, use_tools=False, temperature=0.3)["message"].get("content") or ""
+    except Exception:
+        return question
+    if "</think>" in content:
+        content = content.rsplit("</think>", 1)[1]
+    content = content.strip()
+    return content or question
+
+
+def _emit(question, answer, turns_used, budget_spent, as_json, researched_as=None):
     sources = [{"url": u, "title": t} for u, t in SOURCES.items()]
     if as_json:
-        print(json.dumps({
+        out = {
             "question": question, "answer": answer, "sources": sources,
             "turns_used": turns_used, "budget_spent": budget_spent,
-        }))
+        }
+        # Only present when it differs from `question` -- most callers should
+        # never need this, but it's the honest record of what was actually
+        # researched when enrich_question() rewrote a vague input.
+        if researched_as and researched_as != question:
+            out["researched_as"] = researched_as
+        print(json.dumps(out))
         return
+    if researched_as and researched_as != question:
+        print(f"\n[researched as: {researched_as}]", file=sys.stderr)
     if budget_spent:
         print(f"\n[turn budget spent — forcing an answer from {turns_used} turns of research]")
     print("\n=== ANSWER ===\n" + answer)
@@ -273,9 +334,20 @@ def main():
     p.add_argument("--json", action="store_true",
                     help="emit one JSON object on stdout instead of human-readable text "
                          "-- {question, answer, sources, turns_used, budget_spent}")
+    p.add_argument("--no-enrich", action="store_true",
+                    help="skip the question-enrichment pre-step (see enrich_question()) and "
+                         "research the question exactly as given. Enrichment is on by default "
+                         "because real callers -- a Hermes skill decomposing a vague request, "
+                         "a human typing a quick question -- routinely hand this script an "
+                         "underspecified question, and that underspecification is what let a "
+                         "real comparative sub-question degrade into restating background "
+                         "instead of finding new material. Turn it off for a question that's "
+                         "already a precise, demanding brief -- the extra LLM call has no "
+                         "upside there.")
     args = p.parse_args()
     max_turns = args.max_turns
     question = " ".join(args.question) or "What is AMD Strix Halo and why is it notable?"
+    researched_as = question if args.no_enrich else enrich_question(question)
 
     # Without this the model researches indefinitely -- it has no notion of a
     # turn budget and will keep opening pages until the cap fires with no answer.
@@ -284,8 +356,14 @@ def main():
             "You are a research assistant with web tools. Search, read the most "
             f"promising sources, then ANSWER. You have at most {max_turns} tool "
             f"calls; aim to answer within {max(8, max_turns // 3)}. Do not re-open "
-            "a page you have already read. Cite the URLs you used."},
-        {"role": "user", "content": question},
+            "a page you have already read. When you make a comparative, empirical, "
+            "or 'this changed' claim, name the specific paper, system, organization, "
+            "or person behind it with an approximate date, inline in your answer -- "
+            "not only as a trailing URL list. A claim without a named source attached "
+            "is not an acceptable answer to a comparative question. Do not restate "
+            "background the question already assumes is known as if it were a new "
+            "finding."},
+        {"role": "user", "content": researched_as},
     ]
     for turn in range(max_turns):
         choice = chat(messages)
@@ -328,7 +406,7 @@ def main():
                 "That did not produce a usable answer. Stop researching and "
                 "answer now, using only what you have already read. Cite the "
                 "URLs you used."})
-            _emit(question, force_answer(messages), turn, False, args.json)
+            _emit(question, force_answer(messages), turn, False, args.json, researched_as)
             return
         for c in calls:
             fn = c["function"]["name"]
@@ -352,7 +430,7 @@ def main():
     messages.append({"role": "user", "content":
         "Stop researching and answer now, using only what you have already read. "
         "Cite the URLs you used."})
-    _emit(question, force_answer(messages), max_turns, True, args.json)
+    _emit(question, force_answer(messages), max_turns, True, args.json, researched_as)
 
 
 main()

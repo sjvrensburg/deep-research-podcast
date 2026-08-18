@@ -52,15 +52,26 @@ intended usage, not a bug to optimize away.
 
 ## Scoping a shorter run
 
-Not every request needs 5+ sub-questions at `--max-turns 100`. If the user
-asks for something short, a demo, or a document is already attached (step 2 —
-the document does most of the grounding, so research just needs to add
-context around it), scale down explicitly: 2-3 sub-questions,
-`--max-turns 40`-`60`, and a lower `num_segments` episode profile if one
-exists for shorter episodes. Say so back to the user ("a shorter demo episode,
-maybe 20-30 minutes to generate") rather than defaulting to the multi-hour
-framing every time — that framing describes the default use case, not a fixed
-requirement.
+Not every request needs 5+ sub-questions at `--max-turns 120` (the default
+since 2026-08-18 — was 100). If the user asks for something short, a demo, or
+a document is already attached (step 2 — the document does most of the
+grounding, so research just needs to add context around it), scale down the
+**sub-question count** first: 2-3 sub-questions instead of 5+, and a lower
+`num_segments` episode profile if one exists for shorter episodes. Say so back
+to the user ("a shorter demo episode, maybe 20-30 minutes to generate") rather
+than defaulting to the multi-hour framing every time.
+
+**Don't cut `--max-turns` below ~80 for a comparative or recency sub-question**
+("how does X compare to...", "what's changed since..."). A real run at
+`--max-turns 50` hit the cap on exactly that kind of question — good sources
+had been found, but synthesis never completed, and the episode shipped
+without material that was sitting right there. `openresearcher-run.py` also
+now runs a question-enrichment pass by default (rewriting a casual sub-question
+into a more demanding research brief before research starts — see
+`--no-enrich` in that script if you ever need to disable it), which uses part
+of the turn budget more effectively but doesn't eliminate the need for enough
+turns to actually finish. Trim question *count* for a shorter run, not turn
+budget per question.
 
 ## 1. Decompose the topic into sub-questions — do this yourself, don't skip it
 
@@ -140,7 +151,7 @@ terminal(
     --notebook-name \"<short notebook name>\" \
     --notebook-description \"<one sentence, what this covers>\" \
     --briefing-suffix \"<what specifically to emphasize, from the user's request>\" \
-    --max-turns 100 \
+    --max-turns 120 \
     --deliver-target signal \
     [--source-document \"/tmp/converted-doc.md\" --source-document-title \"<title>\"] \
     \"sub-question 1\" \
@@ -159,9 +170,11 @@ here — that was tied to `background=true`. Losing it is the point of the trade
 job that finishes is worth more than a pollable one that dies with the gateway.
 
 Quote each sub-question as its own argument (the script takes them as `nargs="+"`
-positionals). `--max-turns` is per sub-question, not a total — 100 is a reasonable
-default for genuine depth; raise it (e.g. 150) only if the user explicitly wants
-maximum depth and has signaled they're fine waiting longer. Swap `--deliver-target`
+positionals). `--max-turns` is per sub-question, not a total — 120 is the script's own
+default and a reasonable floor for genuine depth (don't go below ~80 for a
+comparative/recency sub-question — see "Scoping a shorter run" above); raise
+it (e.g. 150) only if the user explicitly wants maximum depth and has
+signaled they're fine waiting longer. Swap `--deliver-target`
 if the request didn't come in over Signal (`hermes send --list` shows targets).
 
 **Reply to the user immediately** after launching, before this step's output even
@@ -205,8 +218,11 @@ the full story.
    disabled-by-default for anything outside the always-on Executor/Mentor/embedding
    tier) and SearXNG if either isn't already up, waits for both to become healthy.
 2. Runs `scripts/openresearcher-run.py --json --max-turns N` once per sub-question
-   — each call drives the model through its own multi-turn agentic search/read/
-   answer loop, returning `{question, answer, sources, turns_used, budget_spent}`.
+   — each call first rewrites the (possibly casually-phrased) sub-question into a
+   more demanding research brief (`enrich_question()`, on by default since
+   2026-08-18 — see `--no-enrich`), then drives the model through its own
+   multi-turn agentic search/read/answer loop, returning `{question, answer,
+   sources, turns_used, budget_spent}`.
 3. Creates a new Open Notebook notebook, adds each sub-question's synthesized
    answer as a `text` source (so it's grounded, vector-searchable content — not
    just a prompt) plus every URL the model actually read as its own `link` source
@@ -214,7 +230,10 @@ the full story.
    `--source-document` was given, its text is added as its own notebook source
    too, **and** folded directly into the podcast content ahead of the research
    sections (2026-08-18) — the only source that reaches the episode itself
-   rather than just the notebook.
+   rather than just the notebook. Each sub-question's answer in the podcast
+   content is also followed by a compact "sources consulted" listing
+   (title + URL, no full text, 2026-08-18) so the episode-generation model has
+   something to actually name when it makes a comparative or empirical claim.
 4. Stops `llama-research` (its research job is done; no reason to hold ~24 GiB
    through the podcast-generation phase that follows, which needs GPU for a
    different model).

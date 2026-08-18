@@ -8,7 +8,7 @@ riffing from memory.
 python3 deep-research-podcast.py \
     --episode-name "Score-driven volatility models" \
     --notebook-name "GAS models research" \
-    --max-turns 100 \
+    --max-turns 120 \
     "What is the history and motivation behind score-driven (GAS) models?" \
     "How do GAS models compare to GARCH and stochastic volatility in practice?" \
     "What are the open controversies or unresolved questions in this area?"
@@ -16,10 +16,17 @@ python3 deep-research-podcast.py \
 
 Each sub-question gets its own 80–150-turn research agent (real web search,
 real page reads, real citations — not one shallow pass), and the synthesized
-answers become the podcast's source material. On a real 5-sub-question run this
-produced 43 cited sources and a 10-segment episode; a smaller 2-question
-smoke test finished in 773.7s end to end. Both are documented below, bugs
-included — this has run at real scale, not just in a demo.
+answers become the podcast's source material. Before research starts, each
+sub-question is also rewritten into a more demanding research brief (see
+"Grounded, citable content by default" below) — real callers, whether a Hermes
+skill decomposing a casual chat message or a human typing a quick question,
+routinely hand this pipeline underspecified questions, and that's compensated
+for in the script rather than left as an instruction someone might skip.
+
+On a real 5-sub-question run this produced 43 cited sources and a 10-segment
+episode; a smaller 2-question smoke test finished in 773.7s end to end. Both
+are documented below, bugs included — this has run at real scale, not just in
+a demo.
 
 ## How it works
 
@@ -205,6 +212,43 @@ research output. All four are fixed in this codebase now:
 Full technical detail on each is in the code's own comments (`api()` in
 `deep-research-podcast.py`, `force_answer()`/`_is_degenerate()` in
 `openresearcher-run.py`).
+
+## Grounded, citable content by default
+
+Fixing the four bugs above got a real episode generating reliably end to end.
+Listening to that episode and cross-checking its transcript against the raw
+research output surfaced a softer problem: a comparative sub-question
+("how does this compare to what other labs have done") never actually named a
+competing lab, system, or paper — it just re-compared against the same
+baselines already inside the source material. Not a bug (the prose was fluent
+and correctly attributed to real research), just weak on the thing that
+research was supposed to add. Three changes address that directly:
+
+- **`--max-turns` default raised 100 → 120.** The sub-question above ran at
+  `--max-turns 50` (deliberately scoped down for a short demo) and hit the cap
+  with good sources already found but no synthesis. Trim sub-question *count*
+  for a shorter run, not turn budget per question — don't go below ~80 for a
+  comparative/recency sub-question specifically.
+- **`enrich_question()`, a new pre-research step in `openresearcher-run.py`,
+  on by default.** One extra LLM call rewrites the input question — which in
+  real usage is often a casual chat message decomposed by an agent skill, not
+  a careful research brief — into a more demanding one: name specific
+  papers/systems/organizations/dates for comparative or recency questions,
+  and explicitly forbid treating already-known background as if restating it
+  were a new finding. The main research system prompt itself now also
+  requires inline attribution (name the source behind a claim in the sentence
+  making it, not only in a trailing URL list). Pass `--no-enrich` if your
+  question is already a precise brief — the extra call has no upside there.
+  Best-effort: a failed enrichment call falls back to the original question.
+- **Podcast content now carries a compact "sources consulted" listing per
+  sub-question** (title + URL only, a handful of lines — nowhere near the
+  raw-full-text scale that caused the 780,063-token failure above), so the
+  episode-generation model has something to actually name.
+
+This doesn't guarantee a future comparative sub-question resolves cleanly —
+it changes what "a natural conclusion" and "a good episode" are asked to look
+like, not what the model is capable of on a given day. Not yet re-verified
+against a full production run.
 
 ## License
 

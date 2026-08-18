@@ -94,7 +94,12 @@ BACKEND_STOP_CMD = os.environ.get("DRP_BACKEND_STOP_CMD", "")
 # and exits, leaving polling to whatever's calling it.
 POLLER_CMD = os.environ.get("DRP_POLLER_CMD", "")
 ON_API = os.environ.get("DRP_OPEN_NOTEBOOK_API", "http://127.0.0.1:5055/api")
-DEFAULT_MAX_TURNS = 100
+# Was 100 until 2026-08-18: a real comparative sub-question hit this exact cap
+# (--max-turns 50 in that run) with good sources found but no synthesis --
+# raised the default, and openresearcher-run.py's question-enrichment step
+# (enrich_question(), on by default) now spends part of that budget pushing
+# toward named, dated sources instead of settling for a quick generality.
+DEFAULT_MAX_TURNS = 120
 
 
 def log(msg):
@@ -253,6 +258,17 @@ def build_podcast_content(results, document=None):
     # 216-2114 chars each on that same run) -- they ARE the point of running
     # OpenResearcher at all, so generating from them directly is both far
     # smaller and more faithful to "the research", not a lossy workaround.
+    #
+    # Each answer is followed by a compact "sources consulted" listing
+    # (title + URL only, no full text) -- added 2026-08-18. Without it, the
+    # episode-generation model only ever saw prose with no named sources
+    # attached, so even when openresearcher-run.py's answer named a specific
+    # paper, there was nothing here confirming what that paper actually was or
+    # linking it to a citable source; a real episode's dialogue ended up
+    # re-explaining background it already had rather than naming the sources
+    # research had genuinely found. This is a handful of short lines per
+    # sub-question -- nowhere near the raw-full-text scale that caused the
+    # 780,063-token failure below.
     parts = []
     if document is not None:
         # Deliberately first and clearly labelled: the document is the
@@ -261,7 +277,13 @@ def build_podcast_content(results, document=None):
         # under whatever the episode-profile's model reads as the strongest
         # signal for what to open with.
         parts.append(f"# Source document: {document['title']}\n\n{document['text']}")
-    parts.extend(f"## {r['question']}\n\n{r['answer']}" for r in results)
+    for r in results:
+        section = f"## {r['question']}\n\n{r['answer']}"
+        srcs = [s for s in r.get("sources", []) if s.get("url")]
+        if srcs:
+            listing = "\n".join(f"- {s['title'] or s['url']} ({s['url']})" for s in srcs)
+            section += f"\n\nSources consulted for this question:\n{listing}"
+        parts.append(section)
     return "\n\n---\n\n".join(parts)
 
 
@@ -369,7 +391,11 @@ def main():
         profile, speakers = args.episode_profile, args.speaker_profile
     job_id = trigger_podcast(content, args.episode_name,
                              args.briefing_suffix or
-                             "Cover every research question above in real depth.",
+                             "Cover every research question above in real depth. "
+                             "When discussing comparisons, trends, or findings, name "
+                             "the specific papers, systems, or organizations behind "
+                             "them (see each question's \"sources consulted\" list) "
+                             "rather than speaking in generalities.",
                              profile, speakers)
 
     if POLLER_CMD:
