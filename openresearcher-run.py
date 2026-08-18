@@ -98,7 +98,21 @@ def _text(raw):
 
 def tool_search(query, topn=10):
     url = f"{SEARX}?{urllib.parse.urlencode({'q': query, 'format': 'json'})}"
-    data = json.loads(_get(url))
+    try:
+        data = json.loads(_get(url))
+    except Exception as e:
+        # Was unguarded until 2026-08-18: a real run's second sub-question hit
+        # a SearXNG 400 (query too long or otherwise malformed -- unconfirmed
+        # which) on this exact call, uncaught, and crashed the whole process.
+        # Because the caller (deep-research-podcast.py) built results in one
+        # list comprehension with no per-question isolation, that crash also
+        # discarded a FIRST sub-question's already-completed research -- a
+        # real instance of exactly the "completed work destroyed by a later
+        # failure" problem the 2026-08-18 api()-retry fix was supposed to
+        # rule out, just in a spot that fix never covered. tool_open() already
+        # treats a failed fetch as normal mid-research noise, not a crash;
+        # tool_search() needs the same treatment, not more of it downstream.
+        return f"Search failed: {type(e).__name__}: {e}. Try a different or shorter query."
     STATE["results"] = data.get("results", [])[:topn]
     if not STATE["results"]:
         return "No results."

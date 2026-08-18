@@ -247,8 +247,34 @@ research was supposed to add. Three changes address that directly:
 
 This doesn't guarantee a future comparative sub-question resolves cleanly —
 it changes what "a natural conclusion" and "a good episode" are asked to look
-like, not what the model is capable of on a given day. Not yet re-verified
-against a full production run.
+like, not what the model is capable of on a given day.
+
+## A fifth bug, found the same day it was supposed to be tested
+
+The very next production run surfaced this directly: sub-question 1 finished
+cleanly (6 sources, natural conclusion, 81 turns — more turns than an earlier
+un-enriched run's 49, consistent with `enrich_question()` pushing for more
+demanding specifics), but sub-question 2's first `browser.search` call hit an
+uncaught SearXNG `HTTPError: 400` and **crashed `openresearcher-run.py`
+outright** — `tool_search()` was the one tool-dispatch function that never got
+`tool_open()`'s exception handling. Worse, `deep-research-podcast.py` built
+every sub-question's result in one bare list comprehension with no
+per-question isolation, so that crash also discarded sub-question 1's
+already-completed research — nothing had been appended anywhere yet. Same
+failure class as the `api()`-retry fix above ("completed work destroyed by a
+later failure"), in a spot that fix never covered. And because the process
+exited before ever reaching the poller handoff, **no notification — success
+or failure — was ever sent**; the only way to know it died was to check
+`systemctl` directly.
+
+Fixed: `tool_search()` now catches search failures the same way `tool_open()`
+already catches fetch failures, returning `"Search failed: ..."` as tool
+output instead of crashing. `deep-research-podcast.py`'s research loop now
+appends each sub-question's result as it completes instead of building the
+whole list in one comprehension — a later failure costs only that
+sub-question, logged and skipped, not the ones that already succeeded. If
+every sub-question fails, the pipeline still raises rather than trying to
+build an episode from nothing.
 
 ## License
 

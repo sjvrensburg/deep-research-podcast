@@ -363,10 +363,30 @@ def main():
                 "trimming to the sections you actually want narrated")
 
     ensure_research_backend()
+    results = []
     try:
-        results = [run_research(q, args.max_turns) for q in args.questions]
+        for q in args.questions:
+            try:
+                results.append(run_research(q, args.max_turns))
+            except Exception as e:
+                # Was a bare list comprehension until 2026-08-18: a real run's
+                # second sub-question crashed openresearcher-run.py entirely
+                # (an uncaught SearXNG error inside tool_search(), separately
+                # fixed there), and because every question's result lived only
+                # in that one comprehension's return value, the crash also
+                # discarded the FIRST sub-question's already-completed
+                # research -- nothing had been appended anywhere yet. Same
+                # class of failure as the api()-retry fix above, just not
+                # covered by it: append as each question finishes, so a later
+                # failure only costs that one sub-question, not every one
+                # that already succeeded.
+                log(f"  warning: research failed for {q[:60]!r}, skipping this "
+                    f"sub-question and continuing with the rest: {e}")
     finally:
         release_research_backend()
+
+    if not results:
+        raise RuntimeError("Every sub-question failed research -- nothing to build a podcast from.")
 
     # 2026-08-18: research used to live only in this process's memory until it
     # reached Open Notebook. A single timed-out /sources/json call after all 5
