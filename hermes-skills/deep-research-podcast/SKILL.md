@@ -1,6 +1,6 @@
 ---
 name: deep-research-podcast
-description: "Intensive multi-hour research via OpenResearcher, fed into a long Open Notebook podcast."
+description: "OpenResearcher-driven research fed into an Open Notebook podcast -- scales from a short single-episode demo to an intensive multi-hour, multi-question deep dive; can also ground an episode directly in an attached document."
 version: 0.1.0
 author: Stefan (sjvrensburg), Hermes Agent
 license: MIT
