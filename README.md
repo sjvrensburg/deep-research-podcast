@@ -164,7 +164,9 @@ of a port of `deploy_agent.py`.
 
 Two small smoke tests (2 sub-questions, 5–8 sources) passed cleanly first.
 A real 5-sub-question run then surfaced three bugs — the kind that only show
-up at genuine scale — and all three are fixed in this codebase now:
+up at genuine scale — and a later document-grounded run surfaced a fourth by
+actually listening to the finished episode and checking it against the raw
+research output. All four are fixed in this codebase now:
 
 - **A 60-second, no-retry HTTP call could kill an otherwise-finished run.**
   All 5 sub-questions had already succeeded when a single `/sources/json`
@@ -186,9 +188,23 @@ up at genuine scale — and all three are fixed in this codebase now:
   worked. Every stop — forced or natural — now routes through the same
   answer-validation path: a real answer, or an honest "no synthesis, here are
   the sources" note. Never unvalidated raw output.
+- **Prose repetition slipped past the fix above, wearing a disguise it didn't
+  anticipate.** A "natural conclusion" (`budget_spent: False`) turned out to
+  be a decent opening paragraph followed by ~25 near-identical sentences —
+  "Use the arxiv (source 0) for detection." on repeat, while the model tried
+  to *plan* citations instead of writing them. `stop=["<tool_call>"]` catches
+  repeated tool-call *syntax*; it doesn't catch a repeated *prose sentence*,
+  and "is `content` non-empty" was the only other check. It never reached the
+  actual episode audio only because Open Notebook's own transcript model
+  happened to filter the noise out while writing dialogue from it — luck, not
+  this script working as designed. Fixed with a sentence-level dedup check
+  (this repetition lands inside one paragraph, not across separate lines, so
+  a naive line-based check would miss it): 4+ verbatim sentence repeats now
+  routes to the same honest fallback as empty content.
 
 Full technical detail on each is in the code's own comments (`api()` in
-`deep-research-podcast.py`, `force_answer()` in `openresearcher-run.py`).
+`deep-research-podcast.py`, `force_answer()`/`_is_degenerate()` in
+`openresearcher-run.py`).
 
 ## License
 

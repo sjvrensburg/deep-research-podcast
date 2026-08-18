@@ -168,6 +168,33 @@ def chat(messages, use_tools=True, stop=None, temperature=0.6):
     return json.load(urllib.request.urlopen(req, timeout=1800))["choices"][0]
 
 
+def _is_degenerate(content):
+    """Catch a repetition failure mode that `stop=["<tool_call>"]` doesn't:
+    prose repetition, not tool-call-syntax repetition.
+
+    Observed 2026-08-18 in a real deep-research-podcast run: force_answer()
+    wrote a decent opening paragraph, then degenerated into ~25 near-identical
+    sentences -- "Use the arxiv (source 0) for detection." repeated over and
+    over -- while trying to plan citations instead of just writing them. That
+    passed every existing check: content was non-empty, contained no
+    `<tool_call>` text, and answer/JSON output are both plain strings, so
+    nothing downstream flagged it. It only didn't reach the actual episode
+    because Open Notebook's own transcript model happened to filter it out --
+    luck, not this script working as designed.
+
+    Sentence-level, not line-level: this kind of repetition lands inside one
+    continuous paragraph, not across separate lines, so splitting on newlines
+    (as a naive dedup check might) would miss it entirely.
+    """
+    sentences = [s.strip().lower() for s in re.split(r"(?<=[.!?])\s+", content) if s.strip()]
+    if len(sentences) < 6:
+        return False
+    counts = {}
+    for s in sentences:
+        counts[s] = counts.get(s, 0) + 1
+    return max(counts.values()) >= 4
+
+
 def force_answer(messages):
     """Get a final answer out of a model that was post-trained hard enough on
     agentic tool use that plain `tool_choice: none` does not reliably stop it
@@ -184,6 +211,10 @@ def force_answer(messages):
        attempts that never resolves. The stop sequence caps that at whatever
        reasoning text came before the first attempt, instead of burning the
        rest of max_tokens on garbage.
+
+    Neither guards against prose-level repetition (a citation-planning
+    sentence looping instead of tool-call syntax looping) -- see
+    `_is_degenerate()` for that case, added after it reached a real run.
     """
     msgs = messages + [{"role": "assistant", "content": "Final answer, no tool calls:"}]
     content = chat(msgs, use_tools=False, stop=["<tool_call>"],
@@ -195,16 +226,17 @@ def force_answer(messages):
     if "</think>" in content:
         content = content.rsplit("</think>", 1)[1]
     content = content.strip()
-    if content:
+    if content and not _is_degenerate(content):
         return content
-    # Observed at very small turn budgets on locally-specific/out-of-training
-    # topics: the model never produces usable prose even with the stop
-    # sequence, spending its whole reasoning turn deciding it wants to search
-    # again. Rather than gamble on a third LLM call (which can just as easily
-    # degenerate the same way -- tried, see the commit message), fall back to
-    # something deterministic and honest: the pipeline downstream (Open
-    # Notebook's own outline/transcript LLM) still gets real material to work
-    # with, and nothing pretends the synthesis succeeded when it didn't.
+    # Reached with either empty content (observed at very small turn budgets
+    # on locally-specific/out-of-training topics: the model never produces
+    # usable prose even with the stop sequence) or degenerate content
+    # (_is_degenerate() above). Rather than gamble on a third LLM call (which
+    # can just as easily degenerate the same way -- tried, see the commit
+    # message), fall back to something deterministic and honest: the pipeline
+    # downstream (Open Notebook's own outline/transcript LLM) still gets real
+    # material to work with, and nothing pretends the synthesis succeeded
+    # when it didn't.
     if SOURCES:
         listing = "\n".join(f"- {t or '(untitled)'}: {u}" for u, t in SOURCES.items())
         return ("Automated research did not produce a synthesized answer within "
