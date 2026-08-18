@@ -50,6 +50,18 @@ intended usage, not a bug to optimize away.
   already signals depth ("intensively research", "as much detail as possible",
   "I'll check it after work") or normal use ("quick podcast on X").
 
+## Scoping a shorter run
+
+Not every request needs 5+ sub-questions at `--max-turns 100`. If the user
+asks for something short, a demo, or a document is already attached (step 2 —
+the document does most of the grounding, so research just needs to add
+context around it), scale down explicitly: 2-3 sub-questions,
+`--max-turns 40`-`60`, and a lower `num_segments` episode profile if one
+exists for shorter episodes. Say so back to the user ("a shorter demo episode,
+maybe 20-30 minutes to generate") rather than defaulting to the multi-hour
+framing every time — that framing describes the default use case, not a fixed
+requirement.
+
 ## 1. Decompose the topic into sub-questions — do this yourself, don't skip it
 
 A single broad query researched for many turns tends to skim breadth-first rather
@@ -64,7 +76,39 @@ This step is deliberately NOT automated by the pipeline script — it needs the
 conversation's context (what did the user actually ask about, what have they
 already said they know) that a standalone script call doesn't have.
 
-## 2. Check the research backend exists
+## 2. If a document was attached, convert it and pass --source-document
+
+**Do this whenever the request came with an attachment** ("do deep research on
+this and make a podcast", a PDF/paper/notes attached). Two steps, both
+required — skipping either recreates a documented failure:
+
+1. Convert the attachment to markdown (e.g. with a document-conversion skill
+   or tool, the same way `open-notebook-podcast` handles attachments). Save
+   the output to a file — the pipeline reads it from disk, not from your
+   context.
+2. Pass that file's path as `--source-document` (and a short
+   `--source-document-title`) to the pipeline invocation in step 3 below.
+
+**Both steps matter, and skipping the second one fails silently.** Adding the
+attachment's text to Open Notebook as a source *without* `--source-document`
+gets it into the notebook for browsing but has **zero effect on the narrated
+episode** — this pipeline generates from `content`, never `notebook_id`, so a
+document that only reaches the notebook is invisible to the actual audio. This
+is the exact "document reaches the briefing, never the notebook" failure
+`open-notebook-podcast`'s SKILL.md documents, one layer deeper: here the
+document can reach the *notebook* and still never reach the *episode*.
+`--source-document` is what actually closes the gap — it folds the document in
+directly, ahead of the research sections, clearly labelled as the primary
+source.
+
+**Once a document is attached, decompose sub-questions to add value *beyond*
+it** — comparisons, real-world reception, follow-up developments, adjacent
+controversies — not to re-explain what it already covers. 2-3 sub-questions is
+usually enough here; the document is doing most of the grounding work, so this
+is also normally a *shorter* run than a from-scratch topic (see "Scoping a
+shorter run" above).
+
+## 3. Check the research backend exists
 
 ```bash
 ls ~/models/openresearcher/OpenResearcher-30B-A3B-Q4_K_M.gguf
@@ -75,7 +119,7 @@ If either is missing, this deep-research path isn't set up on this box — tell 
 user and suggest `open-notebook-podcast` instead (it doesn't need OpenResearcher).
 Don't try to substitute a different model into this pipeline silently.
 
-## 3. Launch the pipeline in the background — never block the turn
+## 4. Launch the pipeline in the background — never block the turn
 
 Launch it as a **transient systemd unit** via a foreground `terminal` call. Do NOT use
 `nohup ... &` / `disown` (the security scanner rejects shell-level background wrappers),
@@ -98,11 +142,16 @@ terminal(
     --briefing-suffix \"<what specifically to emphasize, from the user's request>\" \
     --max-turns 100 \
     --deliver-target signal \
+    [--source-document \"/tmp/converted-doc.md\" --source-document-title \"<title>\"] \
     \"sub-question 1\" \
     \"sub-question 2\" \
     \"sub-question 3\""
 )
 ```
+
+The `--source-document` line is only present if step 2 applies (an attachment
+was converted). Omit it entirely for a from-scratch topic — do not pass an
+empty string.
 
 Track it with `systemctl --user list-units 'deep-research-podcast-*'` and
 `journalctl --user -u <unit> -f`. There is no `session_id` and no `process(action="poll")`
@@ -161,7 +210,11 @@ the full story.
 3. Creates a new Open Notebook notebook, adds each sub-question's synthesized
    answer as a `text` source (so it's grounded, vector-searchable content — not
    just a prompt) plus every URL the model actually read as its own `link` source
-   (deduplicated across sub-questions), all with `embed: true`.
+   (deduplicated across sub-questions), all with `embed: true`. If
+   `--source-document` was given, its text is added as its own notebook source
+   too, **and** folded directly into the podcast content ahead of the research
+   sections (2026-08-18) — the only source that reaches the episode itself
+   rather than just the notebook.
 4. Stops `llama-research` (its research job is done; no reason to hold ~24 GiB
    through the podcast-generation phase that follows, which needs GPU for a
    different model).
