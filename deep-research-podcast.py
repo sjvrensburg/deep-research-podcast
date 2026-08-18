@@ -55,6 +55,19 @@ faithful to "the research" than pulling in every raw source, (6) optionally hand
 off to a poller script for completion notification (DRP_POLLER_CMD; the
 hermes-skills/open-notebook-podcast/scripts/poll_and_notify.sh in this repo is one
 example, written for Hermes Agent + Signal).
+
+OPTIONAL: grounding the episode in an existing document, not just research.
+--source-document takes a path to already-converted text (e.g. a PDF run
+through `marker` or similar -- this script does no document conversion itself).
+That text is added to the notebook as its own source (so it's browsable there)
+AND, unlike every other notebook source, is folded directly into the podcast
+`content` ahead of the research sections, clearly labelled as the primary
+source. This is deliberately different from a plain research sub-question:
+open-notebook-podcast's own SKILL.md documents the failure mode where an
+attached document reaches only the episode briefing and never the notebook,
+so the episode ends up as generic web coverage with the user's actual document
+absent. Passing --source-document sidesteps that by construction -- there is
+no path through this script where the document is fetched but not narrated.
 """
 import argparse
 import json
@@ -174,10 +187,24 @@ def run_research(question, max_turns):
     return result
 
 
-def build_notebook(notebook_name, notebook_description, results):
+def build_notebook(notebook_name, notebook_description, results, document=None):
     log(f"creating notebook {notebook_name!r}")
     nb = api("POST", "/notebooks", {"name": notebook_name, "description": notebook_description})
     nb_id = nb["id"]
+
+    if document is not None:
+        try:
+            api("POST", "/sources/json", {
+                "type": "text", "title": document["title"], "content": document["text"],
+                "notebooks": [nb_id], "embed": True,
+            })
+        except RuntimeError as e:
+            # Not fatal -- the document still reaches the episode via
+            # build_podcast_content() regardless of whether it also made it
+            # into the notebook for browsing. Losing the browsable copy is a
+            # real but strictly smaller problem than losing it from the
+            # narration, which is the failure this flag exists to prevent.
+            log(f"  warning: could not add source document to notebook: {e}")
 
     seen_urls = set()
     for r in results:
@@ -215,7 +242,7 @@ def build_notebook(notebook_name, notebook_description, results):
     return nb_id
 
 
-def build_podcast_content(results):
+def build_podcast_content(results, document=None):
     # Generation is driven by this, NOT notebook_id, since 2026-08-18. The
     # notebook (build_notebook() above) still gets every cited link as a
     # full-text source for browsing/citation in the Open Notebook UI, but
@@ -226,7 +253,15 @@ def build_podcast_content(results):
     # 216-2114 chars each on that same run) -- they ARE the point of running
     # OpenResearcher at all, so generating from them directly is both far
     # smaller and more faithful to "the research", not a lossy workaround.
-    parts = [f"## {r['question']}\n\n{r['answer']}" for r in results]
+    parts = []
+    if document is not None:
+        # Deliberately first and clearly labelled: the document is the
+        # primary source the research sub-questions exist to contextualise,
+        # not one more source among equals. Ordering it last would bury it
+        # under whatever the episode-profile's model reads as the strongest
+        # signal for what to open with.
+        parts.append(f"# Source document: {document['title']}\n\n{document['text']}")
+    parts.extend(f"## {r['question']}\n\n{r['answer']}" for r in results)
     return "\n\n---\n\n".join(parts)
 
 
@@ -275,7 +310,35 @@ def main():
                     help="use --fast-episode-profile/--fast-speaker-profile instead of the "
                          "defaults above, if you keep a faster/lower-quality twin profile "
                          "for when a run was explicitly asked for quickly.")
+    p.add_argument("--source-document",
+                    help="path to already-converted text/markdown (e.g. a PDF run through "
+                         "marker) to ground the episode in directly -- see the module "
+                         "docstring's OPTIONAL section. This script does not convert "
+                         "documents itself.")
+    p.add_argument("--source-document-title", default="",
+                    help="defaults to the --source-document filename if unset")
     args = p.parse_args()
+
+    document = None
+    if args.source_document:
+        with open(args.source_document, encoding="utf-8") as f:
+            doc_text = f.read().strip()
+        if not doc_text:
+            raise RuntimeError(f"--source-document {args.source_document!r} is empty")
+        document = {
+            "title": args.source_document_title or os.path.basename(args.source_document),
+            "text": doc_text,
+        }
+        log(f"source document loaded: {document['title']!r} ({len(doc_text)} chars)")
+        if len(doc_text) > 60000:
+            # Not a hard limit -- your episode profile's model and its
+            # max_tokens override decide what actually fits, and that's not
+            # something this script can know. This is a sanity check, not
+            # enforcement: past this length you're trusting your own context
+            # budget, not this script's judgment.
+            log("  warning: that's long enough to risk the same context-overflow failure "
+                "mode as Bug 2 below, depending on your model's context window -- consider "
+                "trimming to the sections you actually want narrated")
 
     ensure_research_backend()
     try:
@@ -297,8 +360,8 @@ def main():
 
     build_notebook(args.notebook_name,
                    args.notebook_description or f"Deep research: {args.episode_name}",
-                   results)
-    content = build_podcast_content(results)
+                   results, document=document)
+    content = build_podcast_content(results, document=document)
     if args.fast:
         profile = args.fast_episode_profile or args.episode_profile
         speakers = args.fast_speaker_profile or args.speaker_profile

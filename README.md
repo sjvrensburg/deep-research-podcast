@@ -111,6 +111,30 @@ episode's ready; `hermes-skills/open-notebook-podcast/scripts/poll_and_notify.sh
 is a working example (Signal delivery), included for reference rather than as
 a hard dependency.
 
+### Grounding an episode in a document, not just research
+
+`--source-document <path>` takes already-converted text (a PDF run through
+`marker` or similar — this script does no conversion itself) and folds it into
+the episode ahead of the research sections, clearly labelled as the primary
+source. Unlike a plain notebook source, there is no path through this script
+where the document is fetched but not actually narrated — it goes into
+`build_podcast_content()` directly, not just into the notebook for browsing.
+Use the sub-questions to add real value *beyond* the document — comparisons,
+reception, follow-up developments — rather than restating what it already
+covers:
+
+```bash
+python3 deep-research-podcast.py \
+    --episode-name "SynthID-Text: watermarking LLM output at Gemini scale" \
+    --notebook-name "SynthID-Text watermarking" \
+    --source-document ./synthid-text.md \
+    --source-document-title "SynthID-Text (Nature, 2024)" \
+    --briefing-suffix "The source document is the paper itself -- use the research questions for context beyond it, not to re-explain what it already covers." \
+    --max-turns 40 \
+    "How does SynthID-Text's real-world Gemini deployment compare to how other AI labs have approached watermarking or provenance since 2024?" \
+    "What has follow-up research found about watermark robustness against paraphrasing and other scrubbing attacks?"
+```
+
 ## `hermes-skills/`
 
 Two [Hermes Agent](https://hermes-agent.nousresearch.com) skill definitions
