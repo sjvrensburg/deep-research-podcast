@@ -182,6 +182,45 @@ def chat(messages, use_tools=True, stop=None, temperature=0.6):
     return json.load(urllib.request.urlopen(req, timeout=1800))["choices"][0]
 
 
+def _strip_reasoning(message):
+    """Pull the actual answer out of a chat message, whichever way the server
+    chose to report the model's reasoning.
+
+    Two shapes are in play, and the naive `rsplit("</think>", 1)[1]` this
+    replaced was only correct for one of them:
+
+    1. Reasoning INLINE in `content`, terminated by `</think>`, answer after it
+       (llama.cpp's deepseek reasoning-format marker). Tail-after-tag is right.
+    2. Reasoning OUT-OF-BAND in `reasoning_content`, answer in `content` -- but
+       `content` still carries a trailing `</think>` from the template. Here
+       tail-after-tag is the EMPTY STRING, and it silently threw the answer away.
+
+    Shape 2 is what the :8085 research model actually emits, and it broke both
+    callers for as long as they existed (found 2026-08-20): enrich_question()
+    fell through `return content or question` and researched the un-enriched
+    question every time -- so the whole enrichment feature was a no-op, never
+    once observed working -- and force_answer() saw empty content and returned
+    its honest "did not produce a synthesized answer" fallback even when the
+    model HAD written a good answer over 86 turns and 17 sources.
+
+    Rule: if `reasoning_content` is populated, the reasoning is already
+    out-of-band, so `content` is the answer and stray tags are just noise to
+    strip. Otherwise the reasoning is inline and the answer is the tail after
+    the last `</think>` -- an empty tail there is a genuine no-answer (the model
+    spent the whole completion planning), not a parsing artifact, and callers
+    should still treat it as failure.
+    """
+    content = message.get("content") or ""
+    if (message.get("reasoning_content") or "").strip():
+        # Out-of-band reasoning: drop a leading <think> block if one leaked in
+        # anyway, then any stray tag, and keep everything else.
+        content = re.sub(r"^\s*<think>.*?</think>", "", content, flags=re.S)
+        return content.replace("<think>", "").replace("</think>", "").strip()
+    if "</think>" in content:
+        return content.rsplit("</think>", 1)[1].strip()
+    return content.strip()
+
+
 def _is_degenerate(content):
     """Catch a repetition failure mode that `stop=["<tool_call>"]` doesn't:
     prose repetition, not tool-call-syntax repetition.
@@ -231,17 +270,18 @@ def force_answer(messages):
     `_is_degenerate()` for that case, added after it reached a real run.
     """
     msgs = messages + [{"role": "assistant", "content": "Final answer, no tool calls:"}]
-    content = chat(msgs, use_tools=False, stop=["<tool_call>"],
-                   temperature=0.3)["message"].get("content") or ""
-    # A clean run leaves the drafted answer after the model's own closing
-    # </think> tag (llama.cpp's deepseek reasoning-format marker); a
-    # degenerate run never reaches one, so this is a no-op fallback there,
-    # not a silent failure -- see the docstring's case 2.
-    if "</think>" in content:
-        content = content.rsplit("</think>", 1)[1]
-    content = content.strip()
+    content = _strip_reasoning(chat(msgs, use_tools=False, stop=["<tool_call>"],
+                                    temperature=0.3)["message"])
     if content and not _is_degenerate(content):
         return content
+    # Say WHICH failure fired. Both paths produced the same silent fallback
+    # until 2026-08-20, and telling them apart from the outside was impossible
+    # -- an empty `content` caused by the `</think>` parsing bug looked
+    # identical to a model that genuinely had nothing to say, which is exactly
+    # why that bug survived two sessions of debugging the wrong layer.
+    print("[force_answer] falling back: "
+          + ("empty content (model produced no answer text)" if not content
+             else "degenerate content (repetition detected)"), file=sys.stderr)
     # Reached with either empty content (observed at very small turn budgets
     # on locally-specific/out-of-training topics: the model never produces
     # usable prose even with the stop sequence) or degenerate content
@@ -303,12 +343,16 @@ def enrich_question(question):
         {"role": "user", "content": question},
     ]
     try:
-        content = chat(msgs, use_tools=False, temperature=0.3)["message"].get("content") or ""
+        content = _strip_reasoning(chat(msgs, use_tools=False, temperature=0.3)["message"])
     except Exception:
         return question
-    if "</think>" in content:
-        content = content.rsplit("</think>", 1)[1]
-    content = content.strip()
+    if not content:
+        # Silent until 2026-08-20: enrichment failing open is by design, but
+        # failing open INVISIBLY meant a no-op enrichment was indistinguishable
+        # from a question that simply needed no rewriting. It was the former
+        # every single time, for the whole life of the feature.
+        print("[enrich] no usable rewrite; researching the question as given",
+              file=sys.stderr)
     return content or question
 
 
