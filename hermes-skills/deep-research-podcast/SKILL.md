@@ -159,6 +159,8 @@ terminal(
     --setenv=PATH=\"$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin\" \
     --setenv=DRP_ENRICH_LLM_URL=http://127.0.0.1:8088/v1/chat/completions \
     --setenv=DRP_SYNTH_LLM_URL=http://127.0.0.1:8088/v1/chat/completions \
+    --setenv=DRP_BACKEND_START_CMD=\"systemctl --user start llama-research\" \
+    --setenv=DRP_BACKEND_STOP_CMD=\"systemctl --user stop llama-research\" \
     python3 <path-to-this-repo>/deep-research-podcast.py \
     --episode-name \"<descriptive episode title>\" \
     --notebook-name \"<short notebook name>\" \
@@ -172,6 +174,13 @@ terminal(
     \"sub-question 3\""
 )
 ```
+
+The `DRP_BACKEND_START_CMD` / `DRP_BACKEND_STOP_CMD` lines are what actually
+bring `llama-research` up and down. Without them the script does not start it —
+it only health-checks `:8085`, waits 300s, and fails before researching
+anything. (Checking that the unit *exists*, in step 3 above, is not the same as
+starting it.) The stop command runs on every exit path including failure, so the
+model is never left resident to be OOM-killed.
 
 The two `--setenv` LLM lines are **not optional in practice** (2026-08-22).
 Without them, enrichment and the final write-up both run on OpenResearcher,
