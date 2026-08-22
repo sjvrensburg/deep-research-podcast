@@ -121,7 +121,12 @@ appends each result as it completes (never a list comprehension) and skips faile
 sub-questions; results are persisted to `RESULTS_DIR` *before* any Open Notebook call,
 and that write is itself guarded; tool dispatch functions return an error *string* as
 tool output rather than raising. Every exit path notifies — `notify()` is called from the
-top-level handler with `job_id=failed`, not only on success.
+top-level handler with `job_id=failed`, not only on success — and every exit path
+releases the research backend. `release_research_backend()` is idempotent and gated on
+`RUN["backend_started"]` (set before `DRP_BACKEND_START_CMD` runs), so a preflight that
+starts the model and then fails its own health checks cannot strand a multi-GB
+on-demand service: on a memory-tight box that gets OOM-killed and systemd-restarted in a
+loop.
 
 **Podcast generation posts `content`, never `notebook_id`.** A real run's notebook of
 full-text citation PDFs came to 780,063 tokens against a 131,072-token window. The

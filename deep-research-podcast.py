@@ -41,11 +41,13 @@ below) and confirm the LLM + SearXNG endpoints are healthy, (2) run
 openresearcher-run.py --json against each sub-question with a large turn budget,
 persisting the raw results to /tmp/drp-results-<ts>.json as soon as research
 finishes (so a later failure never loses synthesized research, only convenience),
-(3) create an Open Notebook notebook and add each sub-question's answer as a text
-source plus every cited URL as a link source -- for browsing/citation in the Open
-Notebook UI, not for podcast generation (see (5)), (4) optionally stop the research
-backend (DRP_BACKEND_STOP_CMD) if it's a separate on-demand service you don't want
-resident through podcast generation, (5) trigger podcast generation on an episode
+(3) optionally stop the research backend (DRP_BACKEND_STOP_CMD) if it's a separate
+on-demand service you don't want resident through podcast generation -- this happens
+the moment research ends, in a `finally`, and again from the top-level failure handler,
+so a run that dies anywhere never strands a multi-GB model, (4) create an Open Notebook
+notebook and add each sub-question's answer as a text source plus every cited URL as a
+link source -- for browsing/citation in the Open Notebook UI, not for podcast
+generation (see (5)), (5) trigger podcast generation on an episode
 profile that takes `content` directly, NOT `notebook_id` -- on the origin box, a
 real run's 26-source notebook (4 short synthesized answers + 22 full-text citation
 PDFs) totalled 780,063 tokens against a 131,072-token context window and failed
@@ -107,7 +109,12 @@ RESULTS_DIR = os.environ.get("DRP_RESULTS_DIR", "/tmp")
 POLLER_TIMEOUT = int(os.environ.get("DRP_POLLER_TIMEOUT", "14400"))
 # Populated by main() as soon as arguments are parsed, so the top-level failure
 # handler at the bottom of this file can name the episode it is reporting on.
-RUN = {"episode_name": "(unknown episode)", "deliver_target": "signal"}
+RUN = {"episode_name": "(unknown episode)", "deliver_target": "signal",
+       # Backend lifecycle. "started" flips before DRP_BACKEND_START_CMD runs,
+       # so every later exit path knows it owes a stop; "released" makes the
+       # stop idempotent across the research-loop finally and the top-level
+       # failure handler. See release_research_backend().
+       "backend_started": False, "backend_released": False}
 
 DEFAULT_BRIEFING_SUFFIX = (
     "Cover every research question above in real depth. When discussing "
@@ -210,6 +217,11 @@ def ensure_research_backend():
     # llama-research` if the LLM is an on-demand service, or leave it unset if
     # your LLM/SearXNG are already always-on. Either way, both endpoints get a
     # real health check afterward rather than trusting the start command alone.
+    # Set BEFORE the start command, not after (2026-08-22): from here on the
+    # backend must be released on every exit path, and a start command that
+    # partially succeeded -- or succeeded but whose health check then failed --
+    # is exactly the case that used to strand it. See release_research_backend().
+    RUN["backend_started"] = True
     if BACKEND_START_CMD:
         log(f"starting research backend: {BACKEND_START_CMD!r}")
         subprocess.run(shlex.split(BACKEND_START_CMD), check=True)
@@ -229,6 +241,25 @@ def ensure_research_backend():
 
 
 def release_research_backend():
+    """Stop the on-demand research backend. Safe to call more than once.
+
+    Idempotent and reachable from every exit path since 2026-08-22. It used to
+    be called from exactly one place -- a `finally` around the research loop --
+    with ensure_research_backend() sitting OUTSIDE that try. So a preflight that
+    started the LLM and then failed its own health checks (SearXNG unreachable
+    being the obvious one) left a multi-GB model resident with nothing left
+    running to stop it. On a memory-tight box that is not a tidiness problem:
+    an abandoned backend gets OOM-killed, systemd restarts it, and it is killed
+    again -- observed twice in one day -- while also crowding out whatever the
+    machine is actually meant to be doing.
+
+    Only releases if ensure_research_backend() was reached, so an argument or
+    document-loading error before that point does not run a stop command
+    against a service this process never touched.
+    """
+    if RUN["backend_released"] or not RUN["backend_started"]:
+        return
+    RUN["backend_released"] = True
     # Best-effort -- a failure here shouldn't abort a podcast job whose
     # research already succeeded. No-op if DRP_BACKEND_STOP_CMD isn't set.
     if not BACKEND_STOP_CMD:
@@ -466,9 +497,12 @@ def main():
                 "mode as Bug 2 below, depending on your model's context window -- consider "
                 "trimming to the sections you actually want narrated")
 
-    ensure_research_backend()
     results = []
+    # ensure_research_backend() moved INSIDE the try 2026-08-22. It was the one
+    # call that could start the backend and then raise with nothing arranged to
+    # stop it again -- see release_research_backend().
     try:
+        ensure_research_backend()
         for q in args.questions:
             try:
                 results.append(run_research(q, args.max_turns))
@@ -575,6 +609,14 @@ except Exception as exc:
     # Top-level handler added 2026-08-22 -- see notify(). Re-raise after
     # notifying so the exit status and traceback still reach the journal.
     log(f"FAILED: {type(exc).__name__}: {exc}")
+    # Before anything else: do not leave an on-demand model resident because the
+    # run died. Idempotent, so the normal path having already released it is
+    # fine, and it covers the failures the research loop's own finally cannot --
+    # a preflight that raised, or anything between research and the episode.
+    try:
+        release_research_backend()
+    except Exception as release_exc:
+        log(f"warning: could not release the research backend: {release_exc}")
     try:
         notify("failed", RUN["episode_name"], RUN["deliver_target"], failed=True)
     except Exception as notify_exc:
