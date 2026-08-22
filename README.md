@@ -97,6 +97,17 @@ Optionally keep a second, faster/lower-fidelity profile pair and pass `--fast`
 (with `--fast-episode-profile`/`--fast-speaker-profile`) for runs where speed
 beats voice quality.
 
+### Tuning knobs you should not normally need
+
+All optional, all with working defaults — listed because each one exists to
+prevent a specific failure documented at the bottom of this README:
+`DRP_KEEP_TOOL_RESULTS` (8) how many recent tool results stay verbatim in the
+research conversation, `DRP_ANSWER_MAX_TOKENS` (4000) the budget for the
+synthesized answer itself, `DRP_RESEARCH_TIMEOUT` (10800s) the ceiling on one
+sub-question's research subprocess, `DRP_POLLER_TIMEOUT` (14400s), and
+`DRP_RESULTS_DIR` (`/tmp`) where raw research JSON is persisted before any Open
+Notebook call.
+
 ## Usage
 
 ```bash
@@ -119,6 +130,10 @@ is a working example (Signal delivery), included for reference rather than as
 a hard dependency.
 
 ### Grounding an episode in a document, not just research
+
+A `--briefing-suffix` you pass replaces the default coverage instruction but
+never the anti-fabrication clause — that one is appended to every briefing, so
+a custom suffix cannot accidentally drop it.
 
 `--source-document <path>` takes already-converted text (a PDF run through
 `marker` or similar — this script does no conversion itself) and folds it into
@@ -228,7 +243,13 @@ Two honest caveats:
   permitted would compel a general model to read sources. That is coercing one
   model into behaviour another does natively, and its early-stopping instinct
   will fight you at every turn — but it is the honest version of the idea, and
-  it would at least fail loudly rather than silently.
+  it would at least fail loudly rather than silently. Since 2026-08-22 the
+  first half of that is implemented: not N opens, but *at least one* — a run
+  that read nothing now refuses to answer instead of quietly returning a
+  memory-based one (see "A code review, and the two failure modes it found").
+  Point `DRP_LLM_URL` at a general model and you will get that loud failure
+  rather than the silent one described above; that is an improvement, not a
+  substitute for the purpose-trained model.
 
 The conclusion is the boring one: the purpose-trained model earns its keep, and
 `llama-research` stays on-demand. The real cost of that choice is not memory —
@@ -343,6 +364,131 @@ whole list in one comprehension — a later failure costs only that
 sub-question, logged and skipped, not the ones that already succeeded. If
 every sub-question fails, the pipeline still raises rather than trying to
 build an episode from nothing.
+
+## A code review, and the two failure modes it found
+
+Two symptoms kept recurring after the fixes above: runs that never finished,
+and episodes whose content was plausible but not actually traceable to
+anything the researcher read. A full read of both scripts on 2026-08-22 found
+that each symptom had one dominant cause and a tail of smaller ones. All are
+fixed on this branch.
+
+### Why runs did not finish
+
+**The conversation could not fit in the context window, and nothing pruned
+it.** Every tool result was kept verbatim at up to 6000 characters, plus each
+turn's reasoning, and nothing was ever elided. The arithmetic never worked:
+
+| turns | approximate context |
+|---|---|
+| 40 | 69,000 tokens |
+| 80 | **138,000 tokens** |
+| 120 | 207,000 tokens |
+
+against a `DEFAULT_MAX_TURNS` of 120 and a 131,072-token window. A run
+physically could not reach its own turn budget. Somewhere around turn 60–80 the
+server either rejected the over-long request — an uncaught `HTTPError` that
+killed the process and the whole sub-question with it — or, with context
+shifting on, silently dropped the *head* of the conversation: the system prompt
+demanding named inline attribution, followed by the earliest sources read. That
+second outcome is also a direct cause of the grounding problem below, which is
+why the two symptoms kept appearing together. `_prune_history()` now keeps the
+system prompt and the most recent `DRP_KEEP_TOOL_RESULTS` (default 8) tool
+results verbatim and replaces older ones with a one-line stub naming the URL.
+The messages themselves stay — an assistant turn with `tool_calls` must still
+be followed by one `tool` message per call — and nothing citable is lost,
+because `SOURCES` already holds every URL read. Measured: a 200-turn run now
+settles at ~53,000 tokens instead of growing without bound.
+
+**`chat()` was the only fatal network call in the repo.** Every other one
+(`_get`, `tool_search`, `api()`) already degraded; this one, the most
+frequently called, had no handler at all, so one 503 during a service reload
+destroyed 90 turns of research. It now retries transient failures and 5xx/429,
+fails fast on other 4xx, and surfaces the server's actual message.
+
+**The per-sub-question subprocess timeout sat inside the expected runtime.**
+3600s, against a 120-turn budget that realistically takes 40–60 minutes before
+enrichment and page fetches — so it fired on healthy long runs and destroyed
+the sub-question, since the child's answer only existed on its stdout at exit.
+Now `DRP_RESEARCH_TIMEOUT`, default 10800s.
+
+Smaller ones, same class:
+
+- **A notebook failure killed the episode it wasn't needed for.**
+  `build_notebook()` was called unguarded, and `POST /notebooks` inside it was
+  the one API call without its own guard — so a notebook problem aborted the
+  run before `trigger_podcast()`, even though `build_podcast_content()` takes
+  the results directly. Now warned and skipped.
+- **There was still no failure notification.** `DRP_POLLER_CMD` fired only
+  after a successful trigger, and `main()` was called bare at module scope, so
+  every failure ended as a silent dead unit — the exact gap the fifth bug
+  identified and only half-closed. A top-level handler now notifies with
+  `job_id=failed` before re-raising.
+- **The SearXNG health check used the User-Agent SearXNG rejects.**
+  `wait_healthy()` called `urlopen` bare, with the default python-urllib agent
+  that `_get()` sets a browser string specifically to work around — so the
+  preflight could fail against an instance the research loop would have queried
+  fine, aborting before any work. Same agent both places now, and SearXNG gets
+  6 tries instead of 1 (it was given no time to start after
+  `DRP_BACKEND_START_CMD`).
+- **`api()` retried timeouts but not 5xx**, though a 502/503 from a busy Open
+  Notebook is the same transient overload the timeout retry was added for.
+- **The results-persistence write was itself unguarded** — the one line whose
+  purpose is "a crash after here loses nothing".
+
+### Why episodes drifted back to the model's own knowledge
+
+**Nothing, anywhere, required that a single source had been read.** `SOURCES`
+was correctly populated only by a successful `browser.open`, and `--json`
+reported it — but it was never *checked*, only logged. A run that searched,
+opened nothing, and wrote a fluent answer from memory reported
+`budget_spent: False`: a natural conclusion, the most successful-looking
+outcome the script can emit. That is precisely the measured Gemma behaviour in
+the section above, and nothing downstream could tell it from real research.
+`force_answer()` now refuses to return model prose when no source was read, and
+`--json` carries an explicit `grounded` flag that `run_research()` gates on.
+
+**Paging into a document was a no-op.** The model pages with small ordinals —
+this README's own captured trace is `open(0,cursor=1)`, `open(0,cursor=2)` —
+but `tool_open()` sliced `page[cursor:cursor+4000]`, so `cursor=1` returned the
+same opening 4000 characters shifted by *one character*. The single behaviour
+that most distinguishes this model from a general one skimming result titles
+was silently doing nothing, and a model that believes it has read a source to
+the end and has actually re-read its first paragraph three times falls back on
+what it already knows. `cursor` is now a page ordinal (values ≥ `PAGE_CHARS`
+are still honoured as byte offsets, since the old tool output taught the model
+that convention too), and the tool description says which it is.
+
+**A failed sub-question still became an episode section.** `## {question}`
+followed by the canned "did not produce a synthesized answer" string, handed to
+a transcript model under a briefing instructing it to cover every question in
+real depth and name specific papers and organizations. A topic, no evidence,
+and an order to be specific is a fabrication generator. Sections without a
+grounded synthesis are now excluded from the episode entirely (they stay in the
+notebook), and if nothing usable remains the pipeline refuses to generate
+rather than producing an episode about nothing.
+
+**The synthesized answer — the whole product of an 80-turn run — was capped at
+1200 tokens shared with reasoning**, the budget sized for "emit one tool call",
+and `finish_reason` was never inspected, so an answer cut off mid-sentence was
+accepted as complete. Consistent with the 216–2114 characters per answer
+measured above. The answer call now gets `DRP_ANSWER_MAX_TOKENS` (default 4000)
+and flags truncation in-band rather than discarding real synthesis.
+
+**Any HTTP 200 counted as a source read.** No content-type check, no minimum
+length. An arXiv PDF — most of what this pipeline chases — was decoded as UTF-8
+with `errors="replace"` and regex-stripped into mojibake; a Cloudflare
+interstitial extracted to a line of boilerplate. Either way the model learned
+nothing, answered from memory, and the URL still appeared in the episode's
+"sources consulted" list. Grounding theatre: the citation list looks real while
+nothing was read. Non-text content types and extractions under 400 characters
+are now refused, with a message telling the model to open something else.
+
+Two smaller ones: search result ids were per-search and `STATE["results"]` was
+overwritten by each search, so an interleaving model asking for the "[3]" it
+saw two searches ago was silently handed a different document and cited that —
+numbering is now global and monotonic. And `_is_degenerate()` ignored anything
+under six sentences, so five identical sentences scored as fine.
 
 ## License
 

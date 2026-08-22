@@ -94,6 +94,41 @@ BACKEND_STOP_CMD = os.environ.get("DRP_BACKEND_STOP_CMD", "")
 # and exits, leaving polling to whatever's calling it.
 POLLER_CMD = os.environ.get("DRP_POLLER_CMD", "")
 ON_API = os.environ.get("DRP_OPEN_NOTEBOOK_API", "http://127.0.0.1:5055/api")
+# Same agent openresearcher-run.py uses -- see wait_healthy().
+USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) halo-prep/1.0"
+# Wall-clock ceiling for ONE sub-question's research subprocess. Was a hardcoded
+# 3600 until 2026-08-22, which sat inside the expected runtime of the default
+# 120-turn budget (120 turns at 20-30s/turn is 40-60 minutes before enrichment
+# and page fetches) -- so the timeout fired on healthy long runs and destroyed
+# the sub-question, since the child's answer only existed on its stdout at exit.
+RESEARCH_TIMEOUT = int(os.environ.get("DRP_RESEARCH_TIMEOUT", "10800"))
+RESULTS_DIR = os.environ.get("DRP_RESULTS_DIR", "/tmp")
+# A poller that hangs must not hold the run open indefinitely.
+POLLER_TIMEOUT = int(os.environ.get("DRP_POLLER_TIMEOUT", "14400"))
+# Populated by main() as soon as arguments are parsed, so the top-level failure
+# handler at the bottom of this file can name the episode it is reporting on.
+RUN = {"episode_name": "(unknown episode)", "deliver_target": "signal"}
+
+DEFAULT_BRIEFING_SUFFIX = (
+    "Cover every research question above in real depth. When discussing "
+    "comparisons, trends, or findings, name the specific papers, systems, or "
+    "organizations behind them (see each question's \"sources consulted\" list) "
+    "rather than speaking in generalities."
+)
+# Appended to EVERY briefing, the caller's --briefing-suffix included, rather
+# than living inside DEFAULT_BRIEFING_SUFFIX where a caller passing their own
+# suffix would silently drop it (2026-08-22) -- and the documented
+# --source-document workflow in README.md passes one. Everything upstream of
+# here now guarantees the episode model receives only grounded, synthesized
+# material; this is the last link, telling it not to supply from its own
+# knowledge what the material does not contain.
+GROUNDING_CLAUSE = (
+    " Everything you say must come from the material above -- it is the output of "
+    "actual research, and it is the only thing you know about this topic. Do not "
+    "add facts, names, dates, or figures from your own knowledge, and do not fill "
+    "a thin section by elaborating beyond what its sources support; if the "
+    "material does not cover something, say so or leave it out."
+)
 # Was 100 until 2026-08-18: a real comparative sub-question hit this exact cap
 # (--max-turns 50 in that run) with good sources found but no synthesis --
 # raised the default, and openresearcher-run.py's question-enrichment step
@@ -127,7 +162,20 @@ def api(method, path, body=None, timeout=180, retries=3):
                 return json.load(r)
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")
-            raise RuntimeError(f"{method} {path} -> {e.code}: {detail}") from e
+            # 2026-08-22: this used to raise on the FIRST HTTPError regardless of
+            # status. A 429, or a 502/503 from Open Notebook (or a reverse proxy
+            # in front of it) while it is busy embedding a backlog, is the same
+            # transient overload condition the 180s timeout retry above exists
+            # for -- it just surfaces as a status code instead of a socket
+            # timeout. Retry those; keep failing fast on a 4xx, which retrying
+            # verbatim cannot fix.
+            if e.code < 500 and e.code != 429:
+                raise RuntimeError(f"{method} {path} -> {e.code}: {detail}") from e
+            last_exc = RuntimeError(f"{method} {path} -> {e.code}: {detail[:500]}")
+            if attempt < retries - 1:
+                log(f"  api {method} {path} attempt {attempt + 1}/{retries} failed "
+                    f"({e.code}); retrying")
+                time.sleep(5 * (attempt + 1))
         except (TimeoutError, urllib.error.URLError, ConnectionError) as e:
             last_exc = e
             if attempt < retries - 1:
@@ -138,12 +186,22 @@ def api(method, path, body=None, timeout=180, retries=3):
 
 
 def wait_healthy(url, tries=60, interval=5):
-    for _ in range(tries):
+    for attempt in range(tries):
         try:
-            urllib.request.urlopen(url, timeout=3)
+            # The User-Agent matters (2026-08-22). This used to call urlopen()
+            # bare, with python-urllib's default agent -- the exact agent
+            # openresearcher-run.py's _get() sets a browser string to work
+            # around, with the comment "SearXNG and most sites reject the
+            # default python-urllib agent". So the SearXNG preflight below could
+            # fail against an instance the research loop would have queried
+            # perfectly well, aborting the whole pipeline before it did any
+            # work. Same agent here, same result there.
+            urllib.request.urlopen(urllib.request.Request(
+                url, headers={"User-Agent": USER_AGENT}), timeout=5)
             return True
         except Exception:
-            time.sleep(interval)
+            if attempt < tries - 1:
+                time.sleep(interval)
     return False
 
 
@@ -159,7 +217,11 @@ def ensure_research_backend():
         raise RuntimeError(f"LLM endpoint ({LLM_HEALTH_URL}) did not become healthy in time")
 
     searx_check_url = f"{SEARXNG_URL}?q=x&format=json"
-    if not wait_healthy(searx_check_url, tries=1):
+    # tries=6, not 1 (2026-08-22): if DRP_BACKEND_START_CMD just brought SearXNG
+    # up alongside the LLM, a single immediate probe gives it no time to start
+    # listening, and the pipeline aborts before researching anything. The LLM
+    # gets 60 tries; SearXNG deserves more than zero patience.
+    if not wait_healthy(searx_check_url, tries=6):
         raise RuntimeError(
             f"SearXNG ({SEARXNG_URL}) is not reachable -- start it yourself or set "
             "DRP_BACKEND_START_CMD to bring it up alongside the LLM")
@@ -182,13 +244,28 @@ def run_research(question, max_turns):
     log(f"researching: {question!r} (max {max_turns} turns)")
     proc = subprocess.run(
         [sys.executable, OPENRESEARCHER, "--json", "--max-turns", str(max_turns), question],
-        capture_output=True, text=True, timeout=3600)
+        capture_output=True, text=True, timeout=RESEARCH_TIMEOUT)
     if proc.returncode != 0:
         raise RuntimeError(f"openresearcher-run.py failed for {question!r}: {proc.stderr[-2000:]}")
-    result = json.loads(proc.stdout.strip().splitlines()[-1])
+    out = proc.stdout.strip()
+    if not out:
+        raise RuntimeError(f"openresearcher-run.py produced no output for {question!r}: "
+                           f"{proc.stderr[-2000:]}")
+    result = json.loads(out.splitlines()[-1])
     log(f"  -> {len(result['sources'])} sources, "
         f"{'forced' if result['budget_spent'] else 'natural'} conclusion "
         f"after {result['turns_used']} turns")
+    # THE grounding gate, pipeline side (2026-08-22). `sources` counts pages the
+    # model actually opened and read, and until now it was only ever LOGGED --
+    # never checked. A sub-question that searched, read nothing, and wrote a
+    # fluent answer from the model's own memory passed straight through to the
+    # episode, indistinguishable from real research. `grounded` is set by
+    # openresearcher-run.py's _emit(); the len() check keeps this working
+    # against an older result file replayed by hand.
+    if not result.get("grounded", bool(result.get("sources"))):
+        raise RuntimeError(
+            "no source was read for this sub-question, so its answer would be the "
+            "model's own knowledge rather than research -- discarding it")
     return result
 
 
@@ -269,6 +346,31 @@ def build_podcast_content(results, document=None):
     # research had genuinely found. This is a handful of short lines per
     # sub-question -- nowhere near the raw-full-text scale that caused the
     # 780,063-token failure below.
+    # A sub-question with no synthesis is EXCLUDED from the episode entirely
+    # (2026-08-22), not narrated as an empty section. It used to be included:
+    # `## {question}` followed by force_answer()'s canned "did not produce a
+    # synthesized answer, here are the URLs" string. Read that from the
+    # transcript model's side -- a heading naming an interesting topic, no
+    # material under it, and a briefing (see trigger_podcast()'s default
+    # briefing_suffix) instructing it to cover every question in real depth and
+    # name specific papers and organizations. Handed a topic, no evidence, and
+    # an order to be specific, a capable model produces specifics. That is a
+    # fabrication generator, and it is the likeliest route by which "podcast
+    # backed by the model's own knowledge" happened while every research-side
+    # check passed. The notebook still keeps these for inspection.
+    usable = [r for r in results
+              if r.get("synthesized", True) and r.get("grounded", bool(r.get("sources")))]
+    dropped = len(results) - len(usable)
+    if dropped:
+        log(f"  {dropped} sub-question(s) excluded from the episode (no grounded "
+            "synthesis); they remain in the notebook")
+    if not usable and document is None:
+        raise RuntimeError(
+            "No sub-question produced a grounded, synthesized answer, and no "
+            "--source-document was given -- there is nothing to narrate that would "
+            "not be the episode model's own knowledge. Refusing to generate.")
+    results = usable
+
     parts = []
     if document is not None:
         # Deliberately first and clearly labelled: the document is the
@@ -340,6 +442,8 @@ def main():
     p.add_argument("--source-document-title", default="",
                     help="defaults to the --source-document filename if unset")
     args = p.parse_args()
+    RUN["episode_name"] = args.episode_name
+    RUN["deliver_target"] = args.deliver_target
 
     document = None
     if args.source_document:
@@ -395,14 +499,36 @@ def main():
     # it -- unrecoverable except by re-running that sub-question from
     # scratch. Writing it out here means a crash anywhere after this line
     # loses at most convenience, never research.
-    results_path = f"/tmp/drp-results-{int(time.time())}.json"
-    with open(results_path, "w") as f:
-        json.dump(results, f, indent=2)
-    log(f"research results persisted to {results_path}")
+    results_path = os.path.join(RESULTS_DIR, f"drp-results-{int(time.time())}.json")
+    try:
+        with open(results_path, "w") as f:
+            json.dump(results, f, indent=2)
+        log(f"research results persisted to {results_path}")
+    except OSError as e:
+        # Guarded 2026-08-22. This is the one line whose entire purpose is "a
+        # crash after here loses nothing", and an unguarded failure AT it lost
+        # everything -- an unwritable or full /tmp taking down a run whose
+        # research had all succeeded. Dump to stdout instead so the answers are
+        # at least in the journal, and carry on to the episode.
+        log(f"warning: could not persist results to {results_path}: {e}")
+        log("research results follow inline as a fallback:")
+        log(json.dumps(results))
 
-    build_notebook(args.notebook_name,
-                   args.notebook_description or f"Deep research: {args.episode_name}",
-                   results, document=document)
+    try:
+        build_notebook(args.notebook_name,
+                       args.notebook_description or f"Deep research: {args.episode_name}",
+                       results, document=document)
+    except Exception as e:
+        # Guarded 2026-08-22. build_notebook() protects each /sources/json POST
+        # individually but not POST /notebooks, and the call site protected
+        # nothing -- so a failure creating the notebook aborted the run before
+        # trigger_podcast(), losing the episode. The episode does not need the
+        # notebook: build_podcast_content() takes `results` directly, and this
+        # file's own docstring calls the notebook "for browsing/citation in the
+        # Open Notebook UI, not for podcast generation". Losing the browsable
+        # copy is strictly smaller than losing the deliverable.
+        log(f"warning: could not build the notebook ({e}) -- continuing to episode "
+            "generation, which does not depend on it")
     content = build_podcast_content(results, document=document)
     if args.fast:
         profile = args.fast_episode_profile or args.episode_profile
@@ -410,20 +536,47 @@ def main():
     else:
         profile, speakers = args.episode_profile, args.speaker_profile
     job_id = trigger_podcast(content, args.episode_name,
-                             args.briefing_suffix or
-                             "Cover every research question above in real depth. "
-                             "When discussing comparisons, trends, or findings, name "
-                             "the specific papers, systems, or organizations behind "
-                             "them (see each question's \"sources consulted\" list) "
-                             "rather than speaking in generalities.",
+                             (args.briefing_suffix or DEFAULT_BRIEFING_SUFFIX)
+                             + GROUNDING_CLAUSE,
                              profile, speakers)
 
-    if POLLER_CMD:
-        log("handing off for completion notification...")
-        subprocess.run(shlex.split(POLLER_CMD) + [job_id, args.episode_name, args.deliver_target])
-    else:
-        log(f"done. job_id={job_id} -- poll Open Notebook yourself or set DRP_POLLER_CMD "
-            "next time to hand off notification automatically.")
+    notify(job_id, args.episode_name, args.deliver_target)
 
 
-main()
+def notify(job_id, episode_name, deliver_target, failed=False):
+    """Hand off for completion notification -- on failure as well as success.
+
+    POLLER_CMD used to be invoked only after a successful trigger_podcast(),
+    and main() was called bare at module scope with no handler, so every
+    failure mode ended as a silent dead systemd unit -- the README's fifth bug
+    identified exactly this ("no notification -- success or failure -- was ever
+    sent; the only way to know it died was to check systemctl") and only the
+    crash that prompted it got fixed. A failed run passes job_id="failed", so a
+    poller that cannot interpret it still fires and still tells someone.
+    """
+    if not POLLER_CMD:
+        log(f"{'FAILED' if failed else 'done'}. job_id={job_id} -- poll Open Notebook "
+            "yourself or set DRP_POLLER_CMD next time to hand off notification "
+            "automatically.")
+        return
+    log("handing off for notification...")
+    try:
+        subprocess.run(shlex.split(POLLER_CMD) + [job_id, episode_name, deliver_target],
+                       timeout=POLLER_TIMEOUT)
+    except Exception as e:
+        # Never let the notifier be the thing that fails the run: by this point
+        # the episode is already generating on Open Notebook's side.
+        log(f"warning: notification handoff failed: {e}")
+
+
+try:
+    main()
+except Exception as exc:
+    # Top-level handler added 2026-08-22 -- see notify(). Re-raise after
+    # notifying so the exit status and traceback still reach the journal.
+    log(f"FAILED: {type(exc).__name__}: {exc}")
+    try:
+        notify("failed", RUN["episode_name"], RUN["deliver_target"], failed=True)
+    except Exception as notify_exc:
+        log(f"warning: could not send failure notification: {notify_exc}")
+    raise
