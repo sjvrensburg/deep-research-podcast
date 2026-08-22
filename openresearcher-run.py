@@ -48,6 +48,10 @@ SEARX = os.environ.get("DRP_SEARXNG_URL", "http://127.0.0.1:8888/search")
 # but should point at a GENERAL INSTRUCT MODEL if you have one -- see
 # enrich_question() for the measurements. Same OpenAI-compatible shape.
 ENRICH_LLM = os.environ.get("DRP_ENRICH_LLM_URL", "") or LLM
+# Endpoint that WRITES the final report from the sources the researcher read.
+# Defaults to the enrichment model, then to the research model. As with
+# enrichment, a general instruct model is strongly preferred -- see synthesize().
+SYNTH_LLM = os.environ.get("DRP_SYNTH_LLM_URL", "") or ENRICH_LLM
 MAX_TURNS = 20
 PAGE_CHARS = 4000          # per browser.open cursor window
 TOOL_RESULT_CHARS = 6000   # cap on one tool result kept verbatim in history
@@ -115,6 +119,13 @@ STATE = {"results": [], "page": "", "url": "", "opened": {}, "catalog": {}, "nex
 # (keyed by (url, cursor), so one URL appears N times if paged through), is
 # what --json reports as "sources": the URLs the model actually read.
 SOURCES = {}
+# url -> the text actually served to the model from that page, capped. Retained
+# so the report can be written from what was READ rather than from the agentic
+# trajectory -- see synthesize(). Kept separate from SOURCES so the "what did we
+# actually read" accounting stays a plain url->title map.
+SOURCE_TEXT = {}
+SOURCE_TEXT_PER_PAGE = int(os.environ.get("DRP_SOURCE_TEXT_PER_PAGE", "6000"))
+SOURCE_TEXT_TOTAL = int(os.environ.get("DRP_SOURCE_TEXT_TOTAL", "60000"))
 
 
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) halo-prep/1.0"
@@ -266,6 +277,11 @@ def tool_open(ident, cursor=0):
         return (f"{url}\n\n[cursor={cursor} is past the end of this page "
                 f"({len(page)} characters total). Nothing further to read here.]")
     chunk = page[offset:offset + PAGE_CHARS]
+    # Retain what the model was actually shown, so synthesize() can write the
+    # report from the sources rather than from the research trajectory.
+    kept = SOURCE_TEXT.get(url, "")
+    if len(kept) < SOURCE_TEXT_PER_PAGE:
+        SOURCE_TEXT[url] = (kept + ("\n" if kept else "") + chunk)[:SOURCE_TEXT_PER_PAGE]
     more = (f" [truncated — {len(page) - offset - PAGE_CHARS} chars remain, "
             f"use cursor={cursor + 1}]"
             if len(page) > offset + PAGE_CHARS else "")
@@ -439,6 +455,140 @@ def _is_degenerate(content):
     return max(counts.values()) >= 4
 
 
+def _usable_answer(content):
+    """Is this text a real answer, or one of the four ways this model fails?
+
+    Empty, repetitive, and raw tool-call syntax are all things that reached a
+    real episode at some point. `<function=` catches the same failure in the
+    other shape llama.cpp emits it (`<function=browser.open>...`), observed
+    2026-08-22 when the request omits `tools` entirely.
+    """
+    if not content:
+        return False
+    if "<tool_call>" in content or "<function=" in content:
+        return False
+    return not _is_degenerate(content)
+
+
+def synthesize(question):
+    """Write the final report on a WRITER model, from the pages actually read.
+
+    Added 2026-08-22, after the first clean end-to-end run produced two
+    sub-questions with 15 sources each, natural conclusions at 66 and 49 turns
+    -- and no synthesized answer for either. The research went well; the writing
+    never happened.
+
+    The cause is not a prompt. OpenResearcher-30B-A3B does not write final
+    reports, in any context this repo could construct. Measured that day, all
+    with `tools` omitted from the request:
+
+      - prefill "Final answer, no tool calls:" -> the chat template opens the
+        assistant turn inside a reasoning block, so the prefill became the first
+        tokens of the model's THINKING. It thought, closed </think>, and emitted
+        a tool call, which stop=["<tool_call>"] then truncated to nothing. The
+        central mechanism of force_answer() was inverted by the template.
+      - no prefill / no stop / blunt "do not emit any tool call" -> emitted
+        `<tool_call><function=browser.search>...` as plain text anyway.
+      - a CLEAN context (no trajectory, three source excerpts, "write prose,
+        not a list of links") -> 29,084 characters of `<tool_call>` repeated.
+      - Gemma-4-26B-A4B, that same clean prompt -> a correct grounded paragraph
+        naming the system, its authors, its venue and its URL.
+
+    So the researcher researches and a writer writes, which is the same division
+    of labour enrich_question() arrived at from the opposite direction. This is
+    NOT the model answering from memory: the only material in the prompt is text
+    this process fetched and the agent read, and the writer is told so. That is
+    strictly more grounded than the trajectory-based synthesis it replaces,
+    which could and did wander.
+
+    Returns "" if it cannot produce something usable, so callers fall through.
+    """
+    if not SOURCE_TEXT:
+        return ""
+    parts, total = [], 0
+    for i, (url, text) in enumerate(SOURCE_TEXT.items(), 1):
+        title = SOURCES.get(url) or "(untitled)"
+        block = f"SOURCE {i} -- {title} ({url})\n{text}"
+        if total + len(block) > SOURCE_TEXT_TOTAL:
+            break
+        parts.append(block)
+        total += len(block)
+    msgs = [
+        {"role": "system", "content": (
+            "You are a research writer. Using ONLY the source excerpts provided, write a "
+            "detailed, well-structured report answering the user's question. Name each "
+            "specific paper, system, organization or person, with its date, and give the "
+            "URL, inline in the sentence making the claim. Use no knowledge beyond the "
+            "excerpts -- they are the entire result of an automated research pass and the "
+            "only thing you know about this topic. If the excerpts do not settle "
+            "something, say so rather than filling the gap. Do not call tools. Write "
+            "prose, not a list of links."
+        )},
+        {"role": "user", "content":
+            f"Question: {question}\n\nSource excerpts:\n\n" + "\n\n".join(parts)},
+    ]
+    try:
+        choice = chat(msgs, use_tools=False, temperature=0.3,
+                      max_tokens=ANSWER_MAX_TOKENS, endpoint=SYNTH_LLM)
+        content = _strip_reasoning(choice["message"])
+    except Exception as e:
+        print(f"[synthesize] call failed ({e})", file=sys.stderr)
+        return ""
+    if choice.get("finish_reason") == "length" and content:
+        content += ("\n\n[Note: this synthesis was cut off by the answer token limit "
+                    "and may be incomplete.]")
+    if not _usable_answer(content):
+        print(f"[synthesize] unusable output ({len(content)} chars)", file=sys.stderr)
+        return ""
+    print(f"[synthesize] wrote {len(content)} chars from {len(parts)} sources "
+          f"via {SYNTH_LLM}", file=sys.stderr)
+    return content
+
+
+def resolve_answer(messages, question, natural=None):
+    """Produce the final answer, cheapest usable route first.
+
+    Order matters. The natural answer is free and is the model's own conclusion;
+    it used to be discarded unconditionally (a 2026-08-18 change made for good
+    reasons, before _usable_answer() existed to judge it). synthesize() is the
+    reliable route but costs a call on another model. force_answer() is kept for
+    the single-endpoint case, where it is the only thing left to try.
+    """
+    # The grounding gate, before any of it: no page read means anything produced
+    # here is recall, not research. See the long note in the git history.
+    if not SOURCES:
+        STATE["synthesized"] = False
+        print("[answer] refusing: no source was successfully read, so any answer would "
+              "come from the model's own knowledge, not research", file=sys.stderr)
+        return ("Automated research read no sources for this question, so no grounded "
+                "answer could be produced. Nothing here is research output.")
+    if _usable_answer(natural):
+        print(f"[answer] using the model's own concluding answer ({len(natural)} chars)",
+              file=sys.stderr)
+        return natural
+    if SYNTH_LLM != LLM:
+        written = synthesize(question)
+        if written:
+            return written
+    forced = force_answer(messages)
+    if _usable_answer(forced):
+        return forced
+    if SYNTH_LLM == LLM:
+        # Single-endpoint setups only get here after force_answer() failed; try
+        # a clean-context write on the same model rather than giving up. It is
+        # the weakest option, hence last, but it costs one call.
+        written = synthesize(question)
+        if written:
+            return written
+    STATE["synthesized"] = False
+    print("[answer] no usable synthesis; falling back to the source listing",
+          file=sys.stderr)
+    listing = "\n".join(f"- {t or '(untitled)'}: {u}" for u, t in SOURCES.items())
+    return ("Automated research did not produce a synthesized answer within "
+            "its turn budget. The following sources were found and read during "
+            f"research and may still be useful raw material:\n{listing}")
+
+
 def force_answer(messages):
     """Get a final answer out of a model that was post-trained hard enough on
     agentic tool use that plain `tool_choice: none` does not reliably stop it
@@ -476,14 +626,6 @@ def force_answer(messages):
     # stop -> answer from memory"), and downstream it becomes podcast narration
     # indistinguishable from real research. Refuse to launder it: say plainly
     # that nothing was read, and let the pipeline drop the sub-question.
-    if not SOURCES:
-        STATE["synthesized"] = False
-        print("[force_answer] refusing to answer: no source was successfully read, so "
-              "any answer would come from the model's own knowledge, not research",
-              file=sys.stderr)
-        return ("Automated research read no sources for this question, so no grounded "
-                "answer could be produced. Nothing here is research output.")
-
     msgs = messages + [{"role": "assistant", "content": "Final answer, no tool calls:"}]
     # ANSWER_MAX_TOKENS, not the tool-turn budget. Until 2026-08-22 this call
     # shared the 1200-token cap sized for "emit one tool call", and on a
@@ -503,31 +645,22 @@ def force_answer(messages):
               file=sys.stderr)
         content = (content + "\n\n[Note: this synthesis was cut off by the answer token "
                    "limit and may be incomplete.]").strip()
-    if content and not _is_degenerate(content):
+    if _usable_answer(content):
         return content
     # Say WHICH failure fired. Both paths produced the same silent fallback
     # until 2026-08-20, and telling them apart from the outside was impossible
     # -- an empty `content` caused by the `</think>` parsing bug looked
     # identical to a model that genuinely had nothing to say, which is exactly
     # why that bug survived two sessions of debugging the wrong layer.
-    STATE["synthesized"] = False
-    print("[force_answer] falling back: "
-          + ("empty content (model produced no answer text)" if not content
-             else "degenerate content (repetition detected)"), file=sys.stderr)
-    # Reached with either empty content (observed at very small turn budgets
-    # on locally-specific/out-of-training topics: the model never produces
-    # usable prose even with the stop sequence) or degenerate content
-    # (_is_degenerate() above). Rather than gamble on a third LLM call (which
-    # can just as easily degenerate the same way -- tried, see the commit
-    # message), fall back to something deterministic and honest: the pipeline
-    # downstream (Open Notebook's own outline/transcript LLM) still gets real
-    # material to work with, and nothing pretends the synthesis succeeded
-    # when it didn't.
-    # SOURCES is non-empty here -- the empty case returned above.
-    listing = "\n".join(f"- {t or '(untitled)'}: {u}" for u, t in SOURCES.items())
-    return ("Automated research did not produce a synthesized answer within "
-            "its turn budget. The following sources were found and read during "
-            f"research and may still be useful raw material:\n{listing}")
+    why = ("empty content (model produced no answer text)" if not content
+           else "tool-call syntax instead of prose" if ("<tool_call>" in content
+                                                        or "<function=" in content)
+           else "degenerate content (repetition detected)")
+    print(f"[force_answer] no usable answer: {why}", file=sys.stderr)
+    # Returning "" rather than a canned string: resolve_answer() owns the
+    # decision about what to do next, and on this model there is a better next
+    # step than giving up -- see synthesize().
+    return ""
 
 
 def enrich_question(question):
@@ -758,11 +891,21 @@ def main():
             # `messages` here already ends in an assistant turn (the
             # degenerate one), so skipping this would stack two assistant
             # turns back to back with no user turn between them.
+            # The model's own concluding turn is now EXAMINED rather than
+            # discarded (2026-08-22). Routing every tool-calls-empty turn
+            # straight to force_answer() was right in 2026-08-18, when the only
+            # alternative was trusting `content` blindly -- but it also threw
+            # away good answers, and on this model force_answer() then fails
+            # (see synthesize()), so a run that had genuinely concluded emitted
+            # a source listing instead of the conclusion it had just written.
+            # _usable_answer() is the judgement that was missing.
+            natural = _strip_reasoning(msg)
             messages.append({"role": "user", "content":
                 "That did not produce a usable answer. Stop researching and "
                 "answer now, using only what you have already read. Cite the "
                 "URLs you used."})
-            _emit(question, force_answer(messages), turn, False, args.json, researched_as)
+            _emit(question, resolve_answer(messages, question, natural),
+                  turn, False, args.json, researched_as)
             return
         for c in calls:
             fn = c["function"]["name"]
@@ -786,7 +929,8 @@ def main():
     messages.append({"role": "user", "content":
         "Stop researching and answer now, using only what you have already read. "
         "Cite the URLs you used."})
-    _emit(question, force_answer(messages), max_turns, True, args.json, researched_as)
+    _emit(question, resolve_answer(messages, question), max_turns, True, args.json,
+          researched_as)
 
 
 main()

@@ -285,7 +285,17 @@ def run_research(question, max_turns):
     result = json.loads(out.splitlines()[-1])
     log(f"  -> {len(result['sources'])} sources, "
         f"{'forced' if result['budget_spent'] else 'natural'} conclusion "
-        f"after {result['turns_used']} turns")
+        f"after {result['turns_used']} turns, "
+        f"{'synthesized' if result.get('synthesized', True) else 'NO SYNTHESIS'}")
+    # Surface the child's own diagnostics on SUCCESS too (2026-08-22). stderr was
+    # only ever echoed when the subprocess failed, so a run that "succeeded" with
+    # no synthesized answer said nothing about why -- the [force_answer] /
+    # [synthesize] / [enrich] lines explaining it were captured and dropped. That
+    # cost a full 35-minute two-question run to rediagnose by hand.
+    for line in (proc.stderr or "").splitlines():
+        if line.startswith(("[force_answer]", "[synthesize]", "[enrich]", "[answer]",
+                            "[chat]")):
+            log(f"     {line}")
     # THE grounding gate, pipeline side (2026-08-22). `sources` counts pages the
     # model actually opened and read, and until now it was only ever LOGGED --
     # never checked. A sub-question that searched, read nothing, and wrote a
