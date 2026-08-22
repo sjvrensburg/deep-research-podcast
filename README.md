@@ -167,6 +167,74 @@ emits its `browser.*` tool schema correctly through any OpenAI-compatible
 server), so `openresearcher-run.py` is the missing ~150-line executor instead
 of a port of `deploy_agent.py`.
 
+## Why not just use a general model you already have running
+
+The obvious objection to the section above: if the harness is only ~150 lines
+of ordinary OpenAI `tools`/`tool_choice`, why keep a second 24 GiB model on
+call at all? Point `DRP_LLM_URL` at whatever chat model is already resident and
+delete `DRP_BACKEND_START_CMD`, the health wait, and the on-demand service with
+it. It is a one-line change and it is the right instinct — the pipeline is
+deliberately model-agnostic, so it deserved a real test rather than an appeal
+to the model card.
+
+Tested 2026-08-22 against **Gemma-4-26B-A4B**, a capable resident 26B-A4B
+instruct model, on identical terms: same question, same harness, same SearXNG,
+same `--max-turns 10`.
+
+| | Gemma-4-26B-A4B | OpenResearcher-30B-A3B |
+|---|---|---|
+| `browser.search` calls | 3 | 6 |
+| **`browser.open` calls** | **0** | **4** |
+| Sources actually read | **0** | 2 |
+| Turns used | 3 of 10 | 10 of 10 (budget exhausted) |
+| Answer | 2,465 chars, from memory | 447 chars, grounded |
+
+Gemma is not incapable of driving the loop — it emitted well-formed
+`browser.search` calls with genuinely good queries, phrase-quoted and
+progressively refined from general criticisms toward estimation and convergence
+specifics. **It simply never opened anything.** Three searches, a look at the
+result titles, and then it concluded it knew enough and wrote from memory.
+
+The traces are the clearest way to see the difference:
+
+```
+Gemma:           search, search, search, [stop -> answer from memory]
+OpenResearcher:  search, open(0), search, open(0,cursor=1), open(1,cursor=1),
+                 search, open(0,cursor=2), search, search, search
+```
+
+OpenResearcher *interleaves*, and pages deeper into the same document with
+`cursor:1`, `cursor:2`. That is what reading a source looks like. It also emits
+`"topn":10` on every search — the argument the `TOOLS` comment in
+`openresearcher-run.py` notes it was never prompted about. Gemma never uses it.
+That is direct evidence the schema is trained in rather than prompt-followed.
+
+**The dangerous part is that Gemma's answer is the longer and more fluent one.**
+It is well-structured, plausible, and completely ungrounded. It would flow into
+Open Notebook as a "researched source", become podcast narration, and nothing
+downstream would reveal that no page was ever opened. A pipeline whose whole
+premise is *research an agent actually did, not a model riffing from memory*
+would quietly become the second thing while still looking like the first. An
+outright failure would be safer, because it would be visible.
+
+Two honest caveats:
+
+- **10 turns understates OpenResearcher**, badly. Its design point is 80–150
+  turns per sub-question (that is what produces the 43-source runs described
+  below); at 10 it was still mid-investigation and got force-answered, hence
+  the short result. The gap in a real run is wider, not narrower.
+- **If you must drop the second model, change the harness, not the model.**
+  Requiring N successful `browser.open` calls before `force_answer()` is
+  permitted would compel a general model to read sources. That is coercing one
+  model into behaviour another does natively, and its early-stopping instinct
+  will fight you at every turn — but it is the honest version of the idea, and
+  it would at least fail loudly rather than silently.
+
+The conclusion is the boring one: the purpose-trained model earns its keep, and
+`llama-research` stays on-demand. The real cost of that choice is not memory —
+the service is not resident — it is `DRP_BACKEND_START_CMD` plus a health wait
+measured at ~10 s. That is cheap for the property it protects.
+
 ## Hardened by a real production run
 
 Two small smoke tests (2 sub-questions, 5–8 sources) passed cleanly first.

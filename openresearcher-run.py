@@ -46,6 +46,10 @@ PAGE_CHARS = 4000          # per browser.open cursor window
 # The schema the model was post-trained on. Names and argument shapes matter:
 # it emits `browser.search` with a `topn` it was never prompted about, so the
 # tool definitions have to match what it expects rather than what we'd design.
+# Measured 2026-08-22: a general instruct model (Gemma-4-26B-A4B) driving this
+# same schema never emits `topn` -- and never calls `browser.open` at all, so
+# it answers from memory with zero sources read. See the README section "Why
+# not just use a general model you already have running".
 TOOLS = [
     {"type": "function", "function": {
         "name": "browser.search",
