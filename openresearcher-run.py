@@ -261,6 +261,16 @@ def tool_open(ident, cursor=0):
     STATE["page"], STATE["url"] = page, url
     if url not in SOURCES:
         SOURCES[url] = title
+    # Retain the page the moment it is validated, NOT only on the path that
+    # serves a chunk (2026-08-22). A page could otherwise be banked in SOURCES
+    # -- counted as read, listed in the episode's "sources consulted" -- while
+    # contributing nothing to SOURCE_TEXT, so synthesize() never saw it: an open
+    # whose cursor lands past the end of a short page returns early, and so does
+    # a re-open. Measured on a real run: 8 sources read, only 3 reached the
+    # writer. The fetch already succeeded and the text is in hand here; keeping
+    # it costs nothing and closes the gap between "read" and "written from".
+    if url not in SOURCE_TEXT:
+        SOURCE_TEXT[url] = page[:SOURCE_TEXT_PER_PAGE]
     offset = _page_offset(cursor)
     # Re-opening the same (url, cursor) is the observed failure mode: the model
     # asks for id 0 / cursor 0 repeatedly, gets byte-identical content, and
@@ -510,6 +520,13 @@ def synthesize(question):
         title = SOURCES.get(url) or "(untitled)"
         block = f"SOURCE {i} -- {title} ({url})\n{text}"
         if total + len(block) > SOURCE_TEXT_TOTAL:
+            # Say so rather than silently writing from a subset: a report built
+            # from 9 of 20 sources should not look identical to one built from
+            # all of them. Raise DRP_SOURCE_TEXT_TOTAL if your writer's context
+            # allows it.
+            print(f"[synthesize] source text capped at {SOURCE_TEXT_TOTAL} chars -- "
+                  f"{len(SOURCE_TEXT) - len(parts)} of {len(SOURCE_TEXT)} sources "
+                  "excluded from the write-up", file=sys.stderr)
             break
         parts.append(block)
         total += len(block)
