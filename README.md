@@ -104,9 +104,14 @@ prevent a specific failure documented at the bottom of this README:
 `DRP_KEEP_TOOL_RESULTS` (8) how many recent tool results stay verbatim in the
 research conversation, `DRP_ANSWER_MAX_TOKENS` (4000) the budget for the
 synthesized answer itself, `DRP_RESEARCH_TIMEOUT` (10800s) the ceiling on one
-sub-question's research subprocess, `DRP_POLLER_TIMEOUT` (14400s), and
-`DRP_RESULTS_DIR` (`/tmp`) where raw research JSON is persisted before any Open
-Notebook call.
+sub-question's research subprocess, `DRP_POLLER_TIMEOUT` (14400s),
+`DRP_ENRICH_MAX_TOKENS` (4000), and `DRP_RESULTS_DIR` (`/tmp`) where raw
+research JSON is persisted before any Open Notebook call.
+
+`DRP_ENRICH_LLM_URL` is the one worth setting deliberately: it points the
+question-enrichment pre-step at a separate, general instruct model. It defaults
+to `DRP_LLM_URL`, which *works* but is the wrong model for the job — see "A
+sixth bug" below for the measurements.
 
 ## Usage
 
@@ -483,6 +488,57 @@ nothing, answered from memory, and the URL still appeared in the episode's
 "sources consulted" list. Grounding theatre: the citation list looks real while
 nothing was read. Non-text content types and extractions under 400 characters
 are now refused, with a message telling the model to open something else.
+
+### A sixth bug, found by the first live run after the fixes
+
+The grounding gate fired on its very first real invocation — and it was right
+to. `openresearcher-run.py` returned `grounded: false` at **turn 0** on
+*"What is SearXNG and what is it used for?"*, having called no tool at all.
+The cause was `enrich_question()`, on by default since 2026-08-18: asked to
+rewrite the question into a demanding brief, it **answered it instead** —
+
+> "...a free, open-source, decentralized metasearch engine written in Python
+> that aggregates results from multiple search engines into a single
+> interface..."
+
+The research model, handed a user turn that already contained the answer,
+correctly concluded there was nothing to look up and stopped without opening a
+page. Every sub-question was exposed to this. Note the sequence: enrichment was
+a silent no-op for its entire life until the `</think>` parsing fix on
+2026-08-20 (documented above) — so the first time it actually *worked* was the
+first time it could do harm, and what it did was manufacture exactly the
+symptom this whole pipeline exists to prevent.
+
+Prompt tuning alone could not fix it, and the reason is interesting. Measured
+2026-08-22 against OpenResearcher-30B-A3B on identical inputs:
+
+| enrichment prompt | result |
+|---|---|
+| long and careful | 6024 chars of reasoning, hit the token cap, **empty content** |
+| short and direct | degenerated into `<tool_call><tool_call>...` spam |
+| the one that returned prose | **answered the question** inside the brief |
+
+The model is post-trained hard enough on agentic research that it cannot do
+meta-work *about* a research question — the same trait `force_answer()` already
+exists to fight. Handed the same short prompt, **Gemma-4-26B-A4B returned a
+clean brief in 13 seconds**, `finish_reason: stop`, no leaked facts.
+
+That is the exact inverse of this README's earlier comparison, and the two
+findings together are the useful result: *the general model that will not do
+research is good at writing the brief, and the researcher that will not write
+briefs is good at research.* Enrichment now runs against `DRP_ENRICH_LLM_URL`
+(defaulting to `DRP_LLM_URL`, but point it at whatever instruct model you
+already have resident), the empty/truncated/tool-call-spam/implausibly-long
+cases all fall back to the original question and say so on stderr, and the
+brief is **attached to** the question as "Research requirements:" rather than
+replacing it — so a rewriter that leaks something anyway cannot hide the
+question from the agent.
+
+The truncation cause also turned out to be a second instance of the
+`max_tokens` bug fixed above: `enrich_question()` was the other call sharing the
+1200-token tool-turn budget with its own reasoning. It now has
+`DRP_ENRICH_MAX_TOKENS` (4000) and treats `finish_reason: length` as a failed
+enrichment.
 
 Two smaller ones: search result ids were per-search and `STATE["results"]` was
 overwritten by each search, so an interleaving model asking for the "[3]" it

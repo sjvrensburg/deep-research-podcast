@@ -10,6 +10,8 @@ SearXNG instance and it works the same way.
 
     export DRP_LLM_URL=http://127.0.0.1:8085/v1/chat/completions   # your llama-server, vLLM, etc.
     export DRP_SEARXNG_URL=http://127.0.0.1:8888/search            # your SearXNG instance
+    export DRP_ENRICH_LLM_URL=http://127.0.0.1:8088/v1/chat/completions  # any general instruct
+                                                                   # model; see enrich_question()
     python3 openresearcher-run.py "your question"
 
 WHY THIS EXISTS. The model emits `browser.search` / `browser.open` / `browser.find`
@@ -42,6 +44,10 @@ import urllib.request
 
 LLM = os.environ.get("DRP_LLM_URL", "http://127.0.0.1:8085/v1/chat/completions")
 SEARX = os.environ.get("DRP_SEARXNG_URL", "http://127.0.0.1:8888/search")
+# Endpoint for the question-enrichment pre-step. Defaults to the research model,
+# but should point at a GENERAL INSTRUCT MODEL if you have one -- see
+# enrich_question() for the measurements. Same OpenAI-compatible shape.
+ENRICH_LLM = os.environ.get("DRP_ENRICH_LLM_URL", "") or LLM
 MAX_TURNS = 20
 PAGE_CHARS = 4000          # per browser.open cursor window
 TOOL_RESULT_CHARS = 6000   # cap on one tool result kept verbatim in history
@@ -54,6 +60,12 @@ KEEP_VERBATIM_TOOL_RESULTS = int(os.environ.get("DRP_KEEP_TOOL_RESULTS", "8"))
 # the comment in chat().
 TURN_MAX_TOKENS = 1200
 ANSWER_MAX_TOKENS = int(os.environ.get("DRP_ANSWER_MAX_TOKENS", "4000"))
+# Enrichment needs its own budget for the same reason the answer does: measured
+# 2026-08-22, the rewrite call spent 6024 characters on reasoning and hit the
+# 1200-token cap with finish_reason "length" and empty content -- which is
+# exactly why enrichment appeared to "produce no usable rewrite" and silently
+# fell back on every question.
+ENRICH_MAX_TOKENS = int(os.environ.get("DRP_ENRICH_MAX_TOKENS", "4000"))
 # A page that fetched fine but yielded less text than this is not a source. See
 # tool_open().
 MIN_SOURCE_CHARS = 400
@@ -320,7 +332,7 @@ def _prune_history(messages):
 
 
 def chat(messages, use_tools=True, stop=None, temperature=0.6,
-         max_tokens=TURN_MAX_TOKENS, retries=3):
+         max_tokens=TURN_MAX_TOKENS, retries=3, endpoint=None):
     # `_elided` is bookkeeping for _prune_history(), not part of the API schema.
     body = {"messages": [{k: v for k, v in m.items() if k != "_elided"} for m in messages],
             "max_tokens": max_tokens, "temperature": temperature, "top_p": 0.95}
@@ -329,6 +341,7 @@ def chat(messages, use_tools=True, stop=None, temperature=0.6,
     if stop:
         body["stop"] = stop
     data = json.dumps(body).encode()
+    endpoint = endpoint or LLM
     # Unguarded until 2026-08-22, and the only fatal network call in the repo:
     # every other one (_get, tool_search, deep-research-podcast.py's api())
     # already degrades. A single blip here -- a 503 while an on-demand llama
@@ -337,7 +350,7 @@ def chat(messages, use_tools=True, stop=None, temperature=0.6,
     # whatever turn it landed on, 90 turns of real research included.
     last = None
     for attempt in range(retries):
-        req = urllib.request.Request(LLM, data=data,
+        req = urllib.request.Request(endpoint, data=data,
                                      headers={"Content-Type": "application/json"})
         try:
             return json.load(urllib.request.urlopen(req, timeout=1800))["choices"][0]
@@ -518,60 +531,94 @@ def force_answer(messages):
 
 
 def enrich_question(question):
-    """Rewrite a possibly-sloppy input question into a precise research brief
-    before handing it to the agent loop.
+    """Turn a possibly-sloppy input question into extra research requirements.
 
     Added 2026-08-18 after a real deep-research-podcast run: an open,
     casually-phrased sub-question ("how does X compare to what other labs
     have done") reliably let the agent take the easy path -- re-describing
-    background it had already read (the source document's own citations)
-    rather than actually finding and naming new material. That is not
-    force_answer()'s job to catch (the resulting prose was fluent and
-    non-repetitive, so `_is_degenerate()` correctly left it alone) -- the
-    question itself needed to demand more. This is exactly the gap between
-    "what a user types into a chat" and "what a research brief should say,"
-    and real callers (a Hermes skill decomposing a vague request, a human
-    typing a quick question) routinely produce the former. One cheap LLM
-    call up front, asking a model to restate the question with an explicit
-    bar for specificity, costs a few seconds and changes what "a natural
-    conclusion" is allowed to look like for everything downstream.
+    background it had already read rather than actually finding and naming new
+    material. The question itself needed to demand more. Real callers (a Hermes
+    skill decomposing a vague request, a human typing a quick question) produce
+    the casual form routinely.
 
-    Best-effort: a failed enrichment call returns the original question
-    unchanged rather than blocking research on an LLM call that isn't the
-    point of the run.
+    USE A GENERAL INSTRUCT MODEL FOR THIS (DRP_ENRICH_LLM_URL). It defaults to
+    the research model because that is the one endpoint this script is
+    guaranteed to have, but the research model is the wrong tool for the job and
+    the measurements are lopsided. OpenResearcher-30B-A3B is post-trained hard
+    enough on agentic research that it cannot reliably do meta-work about a
+    research question -- the same trait force_answer() exists to fight. Measured
+    2026-08-22 on identical prompts:
+
+      - long, careful prompt -> 6024 characters of reasoning, hit the token cap,
+        empty content. That is why enrichment "produced no usable rewrite".
+      - short prompt -> degenerated into `<tool_call><tool_call>...` spam,
+        trying to research the question instead of scoping it.
+      - the one time it did return prose, it ANSWERED the question inside the
+        brief ("...a free, open-source, decentralized metasearch engine written
+        in Python that aggregates results...") -- and the research model, handed
+        a user turn that already contained the answer, stopped at turn 0 with
+        zero sources.
+      - Gemma-4-26B-A4B on the same prompt: 13 seconds, clean, finish_reason
+        "stop", no leaked facts.
+
+    The neat part is that this is the exact inverse of the comparison in
+    README.md: the general model that will not do research is good at writing
+    the brief, and the researcher that will not write briefs is good at
+    research. Point this at whatever instruct model you already have resident.
+
+    Best-effort throughout: anything that goes wrong returns the original
+    question rather than blocking research on a call that is not the point of
+    the run.
     """
     msgs = [
         {"role": "system", "content": (
-            "You rewrite research questions for an autonomous web-research agent. "
-            "The input question may be short, casual, or underspecified -- typical "
-            "of a real user's chat message, not a careful research brief. Rewrite it "
-            "into a precise, demanding research brief that:\n"
-            "1. Preserves the original question's intent and scope exactly -- do not "
-            "broaden, narrow, or change the topic.\n"
-            "2. If the question asks for a comparison, trend, or what has changed, "
-            "explicitly requires the agent to name specific papers, systems, "
-            "organizations, or people, with approximate dates -- general statements "
-            "without named specifics are not an acceptable answer.\n"
-            "3. Explicitly forbids treating background the question already assumes "
-            "is known (e.g. the subject's own well-known baseline comparisons) as if "
-            "restating it were a new finding.\n"
-            "Return ONLY the rewritten question/brief, 2-4 sentences, nothing else -- "
-            "no preamble, no explanation of what you changed."
+            "Turn the user's question into a short research brief for a "
+            "web-research agent. State only what must be found out and the "
+            "standard the answer must meet: trace claims to named papers, "
+            "systems, organizations or people with dates; do not restate assumed "
+            "background as a finding. Never state a fact about the subject "
+            "yourself -- the agent must find it, and asserting it here tells the "
+            "agent the work is already done. Output 2-3 imperative sentences, "
+            "nothing else."
         )},
         {"role": "user", "content": question},
     ]
     try:
-        content = _strip_reasoning(chat(msgs, use_tools=False, temperature=0.3)["message"])
-    except Exception:
+        # stop=["<tool_call>"] for the same reason force_answer() uses it: if
+        # DRP_ENRICH_LLM_URL was left pointing at the research model, this is
+        # what bounds the tool-call spam described above.
+        choice = chat(msgs, use_tools=False, temperature=0.3,
+                      max_tokens=ENRICH_MAX_TOKENS, stop=["<tool_call>"],
+                      endpoint=ENRICH_LLM)
+        content = _strip_reasoning(choice["message"])
+    except Exception as e:
+        print(f"[enrich] call failed ({e}); researching the question as given",
+              file=sys.stderr)
         return question
-    if not content:
+
+    why = None
+    if choice.get("finish_reason") == "length":
+        # A truncated requirement list is worse than none: it can end mid-clause
+        # and read as a constraint the agent must satisfy.
+        why = "rewrite hit the token limit"
+    elif not content:
+        why = "no usable rewrite"
+    elif "<tool_call>" in content or "</think>" in content:
+        why = "rewrite contained tool-call/reasoning syntax"
+    elif _is_degenerate(content):
+        why = "rewrite was repetitive"
+    elif len(content) > 8 * len(question) + 800:
+        # A brief that dwarfs the question is not a brief; on this model that
+        # shape was an essay that answered the question.
+        why = f"rewrite implausibly long ({len(content)} chars)"
+    if why:
         # Silent until 2026-08-20: enrichment failing open is by design, but
         # failing open INVISIBLY meant a no-op enrichment was indistinguishable
         # from a question that simply needed no rewriting. It was the former
         # every single time, for the whole life of the feature.
-        print("[enrich] no usable rewrite; researching the question as given",
-              file=sys.stderr)
-    return content or question
+        print(f"[enrich] {why}; researching the question as given", file=sys.stderr)
+        return question
+    return content
 
 
 def _emit(question, answer, turns_used, budget_spent, as_json, researched_as=None):
@@ -631,7 +678,24 @@ def main():
     args = p.parse_args()
     max_turns = args.max_turns
     question = " ".join(args.question) or "What is AMD Strix Halo and why is it notable?"
-    researched_as = question if args.no_enrich else enrich_question(question)
+    # The original question always leads, with enrichment ATTACHED as
+    # requirements rather than REPLACING it (2026-08-22). Enrichment used to
+    # substitute its rewrite for the question outright, and the first live run
+    # after the guards above went in showed why that is unsafe: asked to rewrite
+    # "What is SearXNG and what is it used for?", the rewriter returned a brief
+    # that answered it -- "...a free, open-source, decentralized metasearch
+    # engine written in Python that aggregates results from multiple search
+    # engines..." -- and the research model, handed a user turn that already
+    # contained the answer, correctly concluded there was nothing to look up and
+    # stopped at turn 0 with zero sources. Enrichment is on by default, so every
+    # sub-question was exposed to that. The prompt now forbids answer content
+    # (see enrich_question()), and this keeps the question itself in front of the
+    # model even when the rewriter leaks something anyway.
+    requirements = None if args.no_enrich else enrich_question(question)
+    if requirements and requirements != question:
+        researched_as = f"{question}\n\nResearch requirements:\n{requirements}"
+    else:
+        researched_as = question
 
     # Without this the model researches indefinitely -- it has no notion of a
     # turn budget and will keep opening pages until the cap fires with no answer.

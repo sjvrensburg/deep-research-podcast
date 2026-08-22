@@ -44,7 +44,15 @@ Other env vars: `DRP_LLM_HEALTH_URL`, `DRP_BACKEND_START_CMD` / `DRP_BACKEND_STO
 if unset), `DRP_POLLER_CMD` (notification handoff, now fired on failure too),
 `DRP_OPENRESEARCHER_PATH`, `DRP_FAST_EPISODE_PROFILE` / `DRP_FAST_SPEAKER_PROFILE`. Guard
 rails, all with working defaults: `DRP_KEEP_TOOL_RESULTS`, `DRP_ANSWER_MAX_TOKENS`,
-`DRP_RESEARCH_TIMEOUT`, `DRP_POLLER_TIMEOUT`, `DRP_RESULTS_DIR`.
+`DRP_RESEARCH_TIMEOUT`, `DRP_POLLER_TIMEOUT`, `DRP_RESULTS_DIR`,
+`DRP_ENRICH_LLM_URL`, `DRP_ENRICH_MAX_TOKENS`.
+
+Local stack (verified 2026-08-22): SearXNG and Open Notebook run persistently;
+`llama-research.service` (OpenResearcher, port 8085, `--ctx-size 131072`) is on-demand
+via `systemctl --user start llama-research`; `llama-gemma26` on :8088 is a good
+`DRP_ENRICH_LLM_URL`. The box runs several resident llama-servers and is near its memory
+ceiling — starting `llama-research` alongside them has been OOM-killed, so free memory
+before a long run.
 
 There are no tests. Verification is a real run: a 2-sub-question smoke test at reduced
 `--max-turns` for the pipeline, or a single `openresearcher-run.py` call for anything in
@@ -78,8 +86,14 @@ it. Do not simplify these away:
   tool-call syntax). Sentence-split, not line-split, on purpose.
 - When synthesis genuinely fails, the fallback is an honest "no synthesis, here are the
   sources" string — never unvalidated raw model output.
-- `enrich_question()` (on by default, `--no-enrich` to skip) rewrites underspecified
-  questions to demand named, dated sources. Best-effort: failure returns the original.
+- `enrich_question()` (on by default, `--no-enrich` to skip) turns an underspecified
+  question into extra requirements. **Run it on a separate general instruct model via
+  `DRP_ENRICH_LLM_URL`.** OpenResearcher cannot do meta-work about a research question:
+  measured, it either reasons past the token cap, emits `<tool_call>` spam, or answers
+  the question inside the brief — and that last one made the researcher stop at turn 0
+  with zero sources. The brief is *attached* to the question as "Research requirements:",
+  never substituted for it, and every failure mode falls back to the original question
+  with a reason on stderr.
 - **Nothing may reach the episode that no source backs.** `force_answer()` refuses to
   return model prose when `SOURCES` is empty; `run_research()` rejects an ungrounded
   result; `build_podcast_content()` excludes sections without a grounded synthesis and
