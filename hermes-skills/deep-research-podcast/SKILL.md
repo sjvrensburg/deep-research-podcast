@@ -1,7 +1,7 @@
 ---
 name: deep-research-podcast
-description: "OpenResearcher-driven research fed into an Open Notebook podcast -- scales from a short single-episode demo to an intensive multi-hour, multi-question deep dive; can also ground an episode directly in an attached document."
-version: 0.1.0
+description: "USE THIS (not open-notebook-podcast) whenever the user asks for deep research, a deep dive, an intensive or thorough investigation, or names this skill explicitly. OpenResearcher-driven multi-turn web research fed into an Open Notebook podcast -- scales from a short single-episode demo to an intensive multi-hour, multi-question deep dive; can also ground an episode directly in an attached document."
+version: 0.2.1
 author: Stefan (sjvrensburg), Hermes Agent
 license: MIT
 platforms: [linux]
@@ -108,6 +108,21 @@ required — skipping either recreates a documented failure:
    or tool, the same way `open-notebook-podcast` handles attachments). Save
    the output to a file — the pipeline reads it from disk, not from your
    context.
+
+   **marker writes `<output_dir>/<stem>/<stem>.md`, not `<output_dir>/<stem>.md`.**
+   Resolve the real path and check it is non-empty before going any further:
+
+   ```bash
+   STEM=$(basename "$PDF" .pdf); MD="/tmp/marker-out/$STEM/$STEM.md"
+   [ -s "$MD" ] && wc -c "$MD" || echo "CONVERSION FAILED"
+   ```
+
+   On 2026-08-22 this exact assumption cost a run: marker succeeded (70,755
+   chars), the agent looked one directory too high, decided conversion had
+   failed, and shipped an empty source into podcast generation. **If the
+   markdown is missing or empty, stop and tell the user — never continue with
+   the document absent.** The whole point of `--source-document` is that the
+   paper is narrated; without it you are generating from nothing.
 2. Pass that file's path as `--source-document` (and a short
    `--source-document-title`) to the pipeline invocation in step 3 below.
 

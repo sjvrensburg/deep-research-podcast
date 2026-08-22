@@ -169,6 +169,37 @@ profile no episode profile referenced. `tech_discussion_vibevoice` and `deep_div
 created to close that. If a `_vibevoice` profile is ever missing again, check
 `GET /api/episode-profiles` before telling the user which voices they are getting.
 
+## 4b. Verify the sources are non-empty BEFORE generating
+
+Do not skip this. A source can exist with the right title and **zero characters
+of text** — the title comes from what you sent, the text comes from what the
+extractor actually produced, and those fail independently.
+
+```bash
+curl -s "http://127.0.0.1:5055/api/sources?notebook_id=$NB" | python3 -c "
+import json,sys
+ss=json.load(sys.stdin)
+empty=[s for s in ss if not (s.get('full_text') or '').strip()]
+print(f'{len(ss)} sources, {len(empty)} EMPTY')
+for s in empty: print('  EMPTY:', str(s.get('title'))[:70])
+sys.exit(1 if (empty or not ss) else 0)"
+```
+
+**If any source is empty, stop.** Fix the extraction or drop that source; do not
+generate. Observed 2026-08-22: a converted paper failed to reach the notebook
+(the markdown was fine on disk — see `ocr-and-documents`, marker's output is in a
+per-document subdirectory), leaving one 0-character source titled after the
+paper. Generation was triggered anyway, with a briefing asking two specific
+comparative questions. That produces a fluent, confident episode built entirely
+from the model's own knowledge, delivered to the user as a finished deep dive.
+An empty notebook plus a demanding briefing is a fabrication generator, not a
+thin episode.
+
+The same rule applies to the briefing: **instructions are not content.** If the
+material to answer a question is not in the notebook, putting the question in
+`briefing_suffix` does not research it — it just tells the model to sound
+authoritative about something it was never given.
+
 ## 5. Trigger generation
 
 ```bash
