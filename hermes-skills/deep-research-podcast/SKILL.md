@@ -11,6 +11,12 @@ metadata:
     related_skills: [open-notebook-podcast, podcast-workflow, voice-message]
 prerequisites:
   commands: [curl, python3, systemctl]
+  env:
+    # OpenResearcher researches; a general instruct model enriches and writes.
+    # Both default to the research endpoint, which works but badly -- see
+    # "What the script actually does", step 2.
+    DRP_ENRICH_LLM_URL: http://127.0.0.1:8088/v1/chat/completions
+    DRP_SYNTH_LLM_URL: http://127.0.0.1:8088/v1/chat/completions
 ---
 
 # Deep Research Podcast — hours-long, unattended, trigger-and-forget
@@ -72,6 +78,11 @@ into a more demanding research brief before research starts — see
 of the turn budget more effectively but doesn't eliminate the need for enough
 turns to actually finish. Trim question *count* for a shorter run, not turn
 budget per question.
+
+Measured 2026-08-22 on two real runs: 48-66 turns per sub-question, natural
+conclusions (not forced), 8-15 sources each. `--max-turns 120` is a ceiling the
+model rarely reaches, not a target — it is there so a question that needs the
+depth can take it.
 
 ## 1. Decompose the topic into sub-questions — do this yourself, don't skip it
 
@@ -146,6 +157,8 @@ only), and it returns immediately after registering a unit the user manager owns
 terminal(
   command="systemd-run --user --unit=deep-research-podcast-$(date +%s) \
     --setenv=PATH=\"$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin\" \
+    --setenv=DRP_ENRICH_LLM_URL=http://127.0.0.1:8088/v1/chat/completions \
+    --setenv=DRP_SYNTH_LLM_URL=http://127.0.0.1:8088/v1/chat/completions \
     python3 <path-to-this-repo>/deep-research-podcast.py \
     --episode-name \"<descriptive episode title>\" \
     --notebook-name \"<short notebook name>\" \
@@ -159,6 +172,12 @@ terminal(
     \"sub-question 3\""
 )
 ```
+
+The two `--setenv` LLM lines are **not optional in practice** (2026-08-22).
+Without them, enrichment and the final write-up both run on OpenResearcher,
+which cannot do either — the run will research well and then produce no prose,
+and the grounding gate will drop those sub-questions or refuse the episode
+outright. `:8088` is `llama-gemma26`; any resident instruct endpoint works.
 
 The `--source-document` line is only present if step 2 applies (an attachment
 was converted). Omit it entirely for a from-scratch topic — do not pass an
@@ -192,11 +211,14 @@ user-specified cadence (e.g. "check every 20 minutes").
 Also tail the log file (`/tmp/drp-*.log`) to see what sub-question is in progress —
 the script prints `[HH:MM:SS] researching: '<question>'` and completion markers.
 
-The pipeline has 4 phases: (1) start llama-research + SearXNG, (2) run OpenResearcher
-per sub-question, (3) create notebook + add sources, (4) trigger podcast generation
-via `open-notebook-podcast`'s poller. Phase 1–2 are the long part (OpenResearcher's
-multi-turn search loops); phase 4 hands off to the existing poller which notifies on
-completion.
+The pipeline has 5 phases: (1) start llama-research + SearXNG, (2) run OpenResearcher
+per sub-question, (3) stop llama-research the moment research ends, (4) create notebook
++ add sources, (5) trigger podcast generation via `open-notebook-podcast`'s poller.
+Phases 1–2 are the long part (OpenResearcher's multi-turn search loops); phase 5 hands
+off to the existing poller which notifies on completion.
+
+Since 2026-08-22 the poller is also invoked on **failure**, with `job_id=failed` — a run
+that dies no longer ends silently, so you do not have to check `systemctl` to find out.
 
 ### Pitfall: two constraints, and the obvious fix for each breaks the other
 
@@ -218,11 +240,27 @@ the full story.
    disabled-by-default for anything outside the always-on Executor/Mentor/embedding
    tier) and SearXNG if either isn't already up, waits for both to become healthy.
 2. Runs `scripts/openresearcher-run.py --json --max-turns N` once per sub-question
-   — each call first rewrites the (possibly casually-phrased) sub-question into a
-   more demanding research brief (`enrich_question()`, on by default since
-   2026-08-18 — see `--no-enrich`), then drives the model through its own
-   multi-turn agentic search/read/answer loop, returning `{question, answer,
-   sources, turns_used, budget_spent}`.
+   — each call first turns the (possibly casually-phrased) sub-question into extra
+   research requirements (`enrich_question()`, on by default — see `--no-enrich`),
+   then drives the model through its own multi-turn agentic search/read/answer
+   loop, returning `{question, answer, sources, turns_used, budget_spent,
+   grounded, synthesized}`.
+
+   **Two of the three LLM roles are not the research model** (2026-08-22).
+   OpenResearcher researches; a general instruct model writes. Set
+   `DRP_ENRICH_LLM_URL` and `DRP_SYNTH_LLM_URL` to a resident instruct endpoint
+   (on this box, `llama-gemma26` at `:8088`); both fall back to the research
+   endpoint, which *works* but badly. Measured that day: asked to rewrite a
+   question, OpenResearcher answered it instead — and the researcher, handed a
+   question containing its own answer, stopped at turn 0 having read nothing.
+   Asked to write the final report, it emitted `<tool_call>` spam in every
+   context tried, including a clean one. It is a research-trajectory model, not
+   a writer. Two sub-questions with 15 sources each produced no prose at all
+   before this was split out.
+
+   `grounded` is false when no page was read; `synthesized` is false when the
+   answer is a canned fallback rather than research prose. Both matter — see
+   "Known limitations".
 3. Creates a new Open Notebook notebook, adds each sub-question's synthesized
    answer as a `text` source (so it's grounded, vector-searchable content — not
    just a prompt) plus every URL the model actually read as its own `link` source
@@ -236,7 +274,10 @@ the full story.
    something to actually name when it makes a comparative or empirical claim.
 4. Stops `llama-research` (its research job is done; no reason to hold ~24 GiB
    through the podcast-generation phase that follows, which needs GPU for a
-   different model).
+   different model). Since 2026-08-22 this happens on **every** exit path,
+   including a failed preflight and any later crash — it previously had a single
+   call site that a preflight failure skipped, stranding the model to be
+   OOM-killed and systemd-restarted in a loop.
 5. Triggers podcast generation on the **`deep_dive_vibevoice`** episode profile —
    a dedicated profile for this workflow (`tech_experts_vibevoice` speaker pair,
    `num_segments: 10`, vs. the default `tech_discussion_vibevoice` profile's 5,
@@ -253,16 +294,27 @@ the full story.
 
 ## Known limitations
 
-- **The forced-answer fallback can occasionally produce a "no synthesized answer,
-  here are the raw sources" note** instead of clean prose for a given
-  sub-question, if the model genuinely couldn't settle on an answer within its
-  turn budget (rare at 80-150 turns; more common if you or the user pushes
-  `--max-turns` very low). This isn't silently hidden — the note says so
-  explicitly — and Open Notebook's own outline/transcript LLM can still work
-  with a source that's mostly a source list, just with less synthesis quality
-  for that one segment. Not worth re-running over; only worth mentioning to the
-  user if it happened for most/all sub-questions (a sign something's actually
-  wrong, e.g. SearXNG returning nothing).
+- **A sub-question that produced no grounded synthesis is now DROPPED from the
+  episode** (changed 2026-08-22 — the previous behaviour, described here until
+  then, was to let it through as "a source that's mostly a source list, just
+  with less synthesis quality"). That was wrong. What the transcript model
+  actually receives in that case is a heading naming an interesting topic, no
+  material under it, and a briefing instructing it to cover every question in
+  depth and name specific papers — a topic, no evidence, and an order to be
+  specific. It fills the gap from its own knowledge, and the result is
+  indistinguishable from research. Such sections are excluded from the episode
+  (they stay in the notebook), and **if no sub-question survives, the pipeline
+  refuses to generate at all** rather than producing an episode about nothing.
+- **So a run can now fail loudly where it used to produce something.** Two
+  outcomes to relay to the user rather than treat as a crash:
+  `N sub-question(s) excluded from the episode (no grounded synthesis)` means a
+  shorter episode; `Refusing to generate` means no episode. Both mean the
+  research did not produce citable material — check the log for `[synthesize]`
+  and `[answer]` lines, which say why. The usual causes are SearXNG returning
+  nothing, or `DRP_SYNTH_LLM_URL` pointing at the research model (see above).
+- **A run can also drop a sub-question at the research stage**, logged as
+  `warning: research failed for '<question>', skipping`. The others still
+  complete — per-question isolation, not an aborted run.
 - **This does not (yet) verify the deep_dive episode profile still exists** — it
   was created once via `PUT /api/episode-profiles` during this skill's setup. If
   podcast generation 404s on `episode_profile: deep_dive`, that profile was

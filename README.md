@@ -58,6 +58,20 @@ You need three things running, none of them exotic:
    ```bash
    export DRP_LLM_URL=http://127.0.0.1:8085/v1/chat/completions
    ```
+1b. **A general instruct model** for the two jobs the research model cannot do:
+   rewriting the question into a brief, and writing the final report. Any
+   OpenAI-compatible endpoint; it can be a model you already have resident.
+   ```bash
+   export DRP_ENRICH_LLM_URL=http://127.0.0.1:8088/v1/chat/completions
+   export DRP_SYNTH_LLM_URL=http://127.0.0.1:8088/v1/chat/completions
+   ```
+   Both default to `DRP_LLM_URL`. That *runs*, but OpenResearcher answers the
+   question instead of rewriting it, and emits `<tool_call>` spam instead of a
+   report — so the pipeline researches well and then produces nothing, and the
+   grounding gate refuses the episode. See "The seventh and eighth bugs" below
+   for the measurements. If you only set one thing beyond the three below, set
+   these.
+
 2. **A SearXNG instance** with JSON output enabled (`search: formats: [html,
    json]` in `settings.yml`) — no API key needed.
    ```bash
@@ -108,10 +122,11 @@ sub-question's research subprocess, `DRP_POLLER_TIMEOUT` (14400s),
 `DRP_ENRICH_MAX_TOKENS` (4000), and `DRP_RESULTS_DIR` (`/tmp`) where raw
 research JSON is persisted before any Open Notebook call.
 
-`DRP_ENRICH_LLM_URL` is the one worth setting deliberately: it points the
-question-enrichment pre-step at a separate, general instruct model. It defaults
-to `DRP_LLM_URL`, which *works* but is the wrong model for the job — see "A
-sixth bug" below for the measurements.
+`DRP_ENRICH_LLM_URL` and `DRP_SYNTH_LLM_URL` are the two worth setting
+deliberately — see step 1b above. `DRP_SOURCE_TEXT_PER_PAGE` (6000) and
+`DRP_SOURCE_TEXT_TOTAL` (60000) bound how much of each read page is kept for the
+write-up; raise the total if your writer's context allows and you routinely read
+more than ten sources per sub-question (the run log says when it truncates).
 
 ## Usage
 
@@ -545,6 +560,118 @@ overwritten by each search, so an interleaving model asking for the "[3]" it
 saw two searches ago was silently handed a different document and cited that —
 numbering is now global and monotonic. And `_is_degenerate()` ignored anything
 under six sentences, so five identical sentences scored as fine.
+
+## The seventh and eighth bugs: research worked, writing never happened
+
+With everything above fixed, the first clean end-to-end run went like this:
+
+```
+-> 15 sources, natural conclusion after 66 turns
+-> 15 sources, natural conclusion after 49 turns
+notebook has 2 research-note sources + 30 link sources
+2 sub-question(s) excluded from the episode (no grounded synthesis)
+FAILED: No sub-question produced a grounded, synthesized answer ... Refusing to generate.
+```
+
+Thirty sources read across two sub-questions, both concluding naturally rather
+than being force-answered — the best research this pipeline has done — and not
+one word of prose. Both answers were the canned "here are the URLs" fallback, so
+the grounding gate refused the episode. Correctly: under the old code this would
+have shipped two sections of bare URL lists to a transcript model briefed to
+name specific papers in depth, and it would have produced a confident episode
+with essentially no research in it.
+
+**`force_answer()`'s central mechanism had been inverted by the chat template.**
+The prefill `"Final answer, no tool calls:"` lands *inside* the model's `<think>`
+block, because the template opens the assistant turn there. So the phrase became
+the first tokens of the model's reasoning rather than of its answer. It duly
+thought, closed `</think>`, and emitted a tool call — which `stop=["<tool_call>"]`
+truncated to nothing. Empty content, every time. The docstring's careful
+explanation of why the prefill works had been describing something that wasn't
+happening.
+
+No prompt fixes this. Measured 2026-08-22 against OpenResearcher-30B-A3B, all
+with `tools` omitted from the request:
+
+| attempt | result |
+|---|---|
+| prefill + `stop`, as shipped | empty — prefill swallowed by `<think>` |
+| no prefill, no stop | `<tool_call><function=browser.search>` as plain text |
+| blunt "do NOT emit any tool call" | same |
+| **clean context**, 3 source excerpts, "write prose, not a list of links" | **29,084 characters of `<tool_call>` repeated** |
+| **Gemma-4-26B-A4B**, that same clean prompt | a correct grounded paragraph: system, authors, venue, URL |
+
+It is a research-*trajectory* model. It does not write reports, in any context
+this repo could construct. That also explains the "216–2114 chars each"
+measured further up: those were the vestiges of a synthesis step that never
+really worked.
+
+So the researcher researches and a writer writes — the same division of labour
+`enrich_question()` arrived at from the opposite direction, now confirmed from
+both ends. `synthesize()` writes the report on `DRP_SYNTH_LLM_URL` from
+`SOURCE_TEXT`: the page text actually served to the researcher, retained per
+source. **This is more grounded than what it replaces, not less** — the writer's
+prompt contains only text this process fetched and the agent read, it is told
+that is all it knows, and it never sees the question without the sources.
+
+`resolve_answer()` is the cascade: grounding gate → the model's own concluding
+answer if usable → the writer → `force_answer()` → the honest listing. That
+second step matters on its own. The main loop had been *discarding* the model's
+final turn and jumping straight to `force_answer()` — correct in 2026-08-18 when
+there was no way to judge that text, but combined with a `force_answer()` that
+cannot succeed here, it turned genuine conclusions into source listings.
+
+**The eighth bug, found in the next run's log.** Synthesis worked — and reported
+`wrote 3407 chars from 3 sources` for a sub-question that had read **eight**. A
+page that fetched and validated fine was banked in `SOURCES` — counted as read,
+listed in the episode's "sources consulted" — while contributing nothing to
+`SOURCE_TEXT`, because retention only happened on the code path that serves a
+chunk. An open whose cursor lands past the end of a short page returns early,
+and so does a re-open. Same class of overstated grounding as the PDF-mojibake
+case: a citation list saying eight while the prose was written from three. The
+page is now retained the moment it validates, before any early return.
+
+**Why both of these took a live run to find:** `run_research()` captured the
+child's stderr and dropped it unless the subprocess exited non-zero. Every
+`[force_answer]` and `[synthesize]` line explaining what had happened was
+discarded on exactly the runs that "succeeded" without synthesizing anything.
+Those diagnostics now surface in the pipeline log, which is how the eighth bug
+was spotted in seconds rather than after a 35-minute re-run.
+
+## Verified end to end
+
+Second run, after all of the above, same two sub-questions:
+
+```
+-> 8 sources, natural conclusion after 48 turns, synthesized
+   [synthesize] wrote 3407 chars from 3 sources
+-> 15 sources, natural conclusion after 59 turns, synthesized
+   [synthesize] wrote 4474 chars from 14 sources
+triggering podcast generation (deep_dive profile, content=10579 chars)
+job_id=command:qngc4zen765kmp4reqez
+```
+
+Result: a 24-minute, 10-segment episode. Checked along the whole chain —
+
+| stage | check | result |
+|---|---|---|
+| research → synthesis | every URL cited in the prose actually opened and read | 9/9 |
+| synthesis → episode | every named system, author and figure present in the research | all |
+| episode | anything narrated that is not in the research | none found |
+
+Segment titles: *The 'No Free Lunch' Problem*, *Advanced Attacks: B⁴ and the
+RLCracker Threat*, *The Defensive Frontline: SEEK and SimKey*, *Future-Proofing
+with Dual-Embedding Watermarking*. Named papers with authors and dates, specific
+figures (a 98.5% watermark-removal rate against GPT-4o's 6.75%), every one
+traceable to a page the researcher opened.
+
+Two honest notes on that run. Its first sub-question is thin — 2 of 8 sources
+cited, one non-DeepMind lab named, and it spends much of its length re-describing
+SynthID, which is the "restating background" failure enrichment exists to
+prevent; it ran on pre-fix code where five of its eight sources never reached the
+writer. And the writer can still attach wrong metadata to a real source: one
+paper is labelled 2026 while its arXiv ID indicates September 2025. "No
+fabricated citations" is not the same as "every stated fact is correct."
 
 ## License
 

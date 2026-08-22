@@ -45,16 +45,20 @@ if unset), `DRP_POLLER_CMD` (notification handoff, now fired on failure too),
 `DRP_OPENRESEARCHER_PATH`, `DRP_FAST_EPISODE_PROFILE` / `DRP_FAST_SPEAKER_PROFILE`. Guard
 rails, all with working defaults: `DRP_KEEP_TOOL_RESULTS`, `DRP_ANSWER_MAX_TOKENS`,
 `DRP_RESEARCH_TIMEOUT`, `DRP_POLLER_TIMEOUT`, `DRP_RESULTS_DIR`,
-`DRP_ENRICH_LLM_URL`, `DRP_ENRICH_MAX_TOKENS`.
+`DRP_ENRICH_LLM_URL`, `DRP_ENRICH_MAX_TOKENS`, `DRP_SYNTH_LLM_URL`,
+`DRP_SOURCE_TEXT_PER_PAGE`, `DRP_SOURCE_TEXT_TOTAL`.
 
 Local stack (verified 2026-08-22): SearXNG and Open Notebook run persistently;
 `llama-research.service` (OpenResearcher, port 8085, `--ctx-size 131072`) is on-demand
-via `systemctl --user start llama-research`; `llama-gemma26` on :8088 is a good
-`DRP_ENRICH_LLM_URL`. The box runs several resident llama-servers and is near its memory
+via `systemctl --user start llama-research`; `llama-gemma26` on :8088 is the writer for both
+`DRP_ENRICH_LLM_URL` and `DRP_SYNTH_LLM_URL`. The box runs several resident llama-servers and is near its memory
 ceiling — starting `llama-research` alongside them has been OOM-killed, so free memory
 before a long run.
 
-There are no tests. Verification is a real run: a 2-sub-question smoke test at reduced
+There is a verification harness in the session scratchpad (81 checks over the changed
+logic, stubbed I/O, no live services) — recreate it rather than trusting a green
+compile. But the last three bugs were all invisible to code reading and to that
+harness; they showed up only in a live run's log. Verification is a real run: a 2-sub-question smoke test at reduced
 `--max-turns` for the pipeline, or a single `openresearcher-run.py` call for anything in
 the research half. Watch stderr — `openresearcher-run.py` logs each turn's tool call
 there, and `force_answer()` / `enrich_question()` print why a fallback fired.
@@ -86,9 +90,23 @@ it. Do not simplify these away:
   tool-call syntax). Sentence-split, not line-split, on purpose.
 - When synthesis genuinely fails, the fallback is an honest "no synthesis, here are the
   sources" string — never unvalidated raw model output.
+- **Three LLM roles, and only one of them is the research model.** OpenResearcher
+  researches; a general instruct model both enriches the question
+  (`DRP_ENRICH_LLM_URL`) and writes the final report (`DRP_SYNTH_LLM_URL`). Both
+  default to `DRP_LLM_URL` and both are measurably wrong there: it answers questions
+  it was asked to rewrite, and emits `<tool_call>` spam instead of prose in every
+  context tried, including a clean one with no trajectory. Do not "simplify" these
+  back to one endpoint.
+- `resolve_answer()` is the answer cascade: grounding gate → the model's own
+  concluding turn if `_usable_answer()` accepts it → `synthesize()` on the writer →
+  `force_answer()` → honest source listing. `force_answer()`'s prefill lands inside
+  the model's `<think>` block, so it usually fails here; it is kept for
+  single-endpoint setups.
+- `synthesize()` writes from `SOURCE_TEXT` — the page text actually served to the
+  researcher. `tool_open()` must retain that text *before* any early return, or a
+  page counts as read while contributing nothing to the write-up.
 - `enrich_question()` (on by default, `--no-enrich` to skip) turns an underspecified
-  question into extra requirements. **Run it on a separate general instruct model via
-  `DRP_ENRICH_LLM_URL`.** OpenResearcher cannot do meta-work about a research question:
+  question into extra requirements. OpenResearcher cannot do meta-work about a research question:
   measured, it either reasons past the token cap, emits `<tool_call>` spam, or answers
   the question inside the brief — and that last one made the researcher stop at turn 0
   with zero sources. The brief is *attached* to the question as "Research requirements:",
