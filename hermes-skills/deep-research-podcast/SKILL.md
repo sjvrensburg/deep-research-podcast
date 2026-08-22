@@ -1,7 +1,7 @@
 ---
 name: deep-research-podcast
 description: "USE THIS (not open-notebook-podcast) whenever the user asks for deep research, a deep dive, an intensive or thorough investigation, or names this skill explicitly. OpenResearcher-driven multi-turn web research fed into an Open Notebook podcast -- scales from a short single-episode demo to an intensive multi-hour, multi-question deep dive; can also ground an episode directly in an attached document."
-version: 0.2.1
+version: 0.3.0
 author: Stefan (sjvrensburg), Hermes Agent
 license: MIT
 platforms: [linux]
@@ -157,6 +157,31 @@ user and suggest `open-notebook-podcast` instead (it doesn't need OpenResearcher
 Don't try to substitute a different model into this pipeline silently.
 
 ## 4. Launch the pipeline in the background — never block the turn
+
+**Simplest correct form: add `--detach` and call it however you like.** The
+script re-launches itself as a transient systemd unit and returns in under
+0.1s, forwarding every `DRP_*` variable, and prints the unit name and log path.
+Added 2026-08-22 after an agent ran this pipeline in the foreground despite
+three warnings in this file and had it killed by the harness's 60-second tool
+timeout, mid-run. Do not rely on remembering the wrapper — pass `--detach`.
+
+```bash
+terminal(
+  command="DRP_ENRICH_LLM_URL=http://127.0.0.1:8088/v1/chat/completions \
+    DRP_SYNTH_LLM_URL=http://127.0.0.1:8088/v1/chat/completions \
+    DRP_BACKEND_START_CMD='systemctl --user start llama-research' \
+    DRP_BACKEND_STOP_CMD='systemctl --user stop llama-research' \
+    python3 ~/Projects/deep-research-podcast/deep-research-podcast.py --detach \
+    --episode-name \"<title>\" --notebook-name \"<name>\" \
+    --max-turns 120 --deliver-target signal \
+    [--source-document \"/tmp/marker-out/<stem>/<stem>.md\" --source-document-title \"<title>\"] \
+    \"sub-question 1\" \"sub-question 2\""
+)
+```
+
+It prints `detached as deep-research-podcast-<ts>` and a log path; report that to
+the user and stop. The equivalent explicit `systemd-run` form below still works
+and is what `--detach` does internally.
 
 Launch it as a **transient systemd unit** via a foreground `terminal` call. Do NOT use
 `nohup ... &` / `disown` (the security scanner rejects shell-level background wrappers),

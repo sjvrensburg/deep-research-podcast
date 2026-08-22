@@ -212,6 +212,30 @@ def wait_healthy(url, tries=60, interval=5):
     return False
 
 
+def preflight_warnings():
+    """Say up front when the run is configured to fail late.
+
+    Both of these produce a run that researches perfectly and then has nothing
+    to show for it, 30+ minutes later. Cheap to check, expensive to discover.
+    """
+    synth = os.environ.get("DRP_SYNTH_LLM_URL", "")
+    enrich = os.environ.get("DRP_ENRICH_LLM_URL", "")
+    if not synth:
+        log("WARNING: DRP_SYNTH_LLM_URL is unset, so the final write-up will run on "
+            "the research model. Measured 2026-08-22: OpenResearcher cannot write a "
+            "report -- it emits tool-call syntax instead of prose in every context "
+            "tried -- so sub-questions will very likely end with no synthesis and be "
+            "dropped from the episode. Point it at any general instruct endpoint.")
+    if not enrich:
+        log("WARNING: DRP_ENRICH_LLM_URL is unset; question enrichment will run on the "
+            "research model, which tends to answer the question instead of rewriting "
+            "it. Pass --no-enrich or set the variable.")
+    if not BACKEND_START_CMD:
+        log(f"note: DRP_BACKEND_START_CMD is unset -- expecting {LLM_HEALTH_URL} to be "
+            "healthy already; if it is an on-demand service this run will wait and "
+            "then fail.")
+
+
 def ensure_research_backend():
     # DRP_BACKEND_START_CMD is your business -- e.g. `systemctl --user start
     # llama-research` if the LLM is an on-demand service, or leave it unset if
@@ -482,7 +506,37 @@ def main():
                          "documents itself.")
     p.add_argument("--source-document-title", default="",
                     help="defaults to the --source-document filename if unset")
+    p.add_argument("--detach", action="store_true",
+                    help="re-launch this same invocation as a detached systemd user unit "
+                         "and return immediately, printing the unit name and log path. "
+                         "Use this from ANY agent harness: the run takes 30 minutes to "
+                         "hours, and a foreground call will be killed by the harness's "
+                         "own tool timeout (observed 2026-08-22: a Hermes terminal call "
+                         "killed a run 60 seconds in). Every DRP_* variable in the "
+                         "current environment is forwarded to the unit.")
     args = p.parse_args()
+    if args.detach and not os.environ.get("DRP_DETACHED"):
+        # Self-backgrounding, added 2026-08-22. The skill documentation told the
+        # calling agent three separate times to wrap this in `systemd-run`; it
+        # ran it in the foreground anyway and the harness killed the run after
+        # 60 seconds. Relying on an agent to remember the launch idiom is a bet
+        # this pipeline keeps losing, so the script now owns it: --detach
+        # re-executes this exact invocation as a transient unit and returns.
+        unit = f"deep-research-podcast-{int(time.time())}"
+        logfile = os.path.join(RESULTS_DIR, f"{unit}.log")
+        passthrough = [a for a in sys.argv[1:] if a != "--detach"]
+        env = [f"--setenv={k}={v}" for k, v in os.environ.items()
+               if k.startswith("DRP_")]
+        env += [f"--setenv=DRP_DETACHED=1", f"--setenv=PATH={os.environ.get('PATH','')}"]
+        cmd = (["systemd-run", "--user", f"--unit={unit}", "--collect"] + env
+               + [f"--property=StandardOutput=append:{logfile}",
+                  f"--property=StandardError=append:{logfile}",
+                  sys.executable, os.path.abspath(__file__)] + passthrough)
+        subprocess.run(cmd, check=True)
+        print(f"detached as {unit}")
+        print(f"log: {logfile}")
+        print(f"follow with: journalctl --user -f -u {unit}  (or: tail -f {logfile})")
+        return
     RUN["episode_name"] = args.episode_name
     RUN["deliver_target"] = args.deliver_target
 
@@ -512,6 +566,7 @@ def main():
     # call that could start the backend and then raise with nothing arranged to
     # stop it again -- see release_research_backend().
     try:
+        preflight_warnings()
         ensure_research_backend()
         for q in args.questions:
             try:
