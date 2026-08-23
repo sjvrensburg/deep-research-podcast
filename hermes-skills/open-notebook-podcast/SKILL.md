@@ -230,12 +230,18 @@ The moment you have `job_id`, do two things in this order:
 2. **Launch the poller as a transient systemd unit**, then let the turn end:
    ```bash
    terminal(
-     command="systemd-run --user --unit=podcast-poller-$(date +%s) \
+     command="systemd-run --user --collect --unit=podcast-poller-$(date +%s) \
        --setenv=PATH=\"$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin\" \
        /bin/bash ~/.hermes/skills/research/open-notebook-podcast/scripts/poll_and_notify.sh \
        \"<job_id>\" \"<episode name>\" signal"
    )
    ```
+
+   `--collect` matters: without it a poller that exits non-zero stays in
+   systemd's list forever as a `failed` unit, and a new one is created per
+   episode. Observed 2026-08-23: leftover `podcast-poller-*` units accumulating
+   from earlier runs. With it, the unit is garbage-collected either way and the
+   Signal notification behaviour is unchanged.
    **Not `terminal(background=true)`, and not `nohup`.** This is a change from the pre-2026-08-17
    guidance and it is load-bearing — see `references/background-launch-pitfall.md` for the full
    story. Short version: `background=true` makes the poller a child of the gateway, so
