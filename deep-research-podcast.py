@@ -75,6 +75,7 @@ import argparse
 import json
 import os
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -668,9 +669,31 @@ def notify(job_id, episode_name, deliver_target, failed=False):
         log(f"warning: notification handoff failed: {e}")
 
 
+def _terminate(signum, _frame):
+    """Turn a signal into an exception so the handler below actually runs.
+
+    Added 2026-08-23. The whole point of release_research_backend() is that a
+    run which dies anywhere never strands a multi-GB on-demand model -- but the
+    handler below caught `Exception`, and the most likely way one of these runs
+    ends early is not an exception at all. Runs are launched detached as
+    transient systemd units (--detach), so `systemctl --user stop <unit>` sends
+    SIGTERM, which by default terminates the process with nothing unwound: no
+    release, no notification. Ctrl-C on a foreground run had the same gap
+    (KeyboardInterrupt is not an Exception). Deliberately minimal -- raise and
+    get out of the handler; anything more here risks hanging the shutdown it
+    exists to make clean.
+    """
+    raise SystemExit(f"terminated by signal {signum}")
+
+
+signal.signal(signal.SIGTERM, _terminate)
+signal.signal(signal.SIGHUP, _terminate)
+
 try:
     main()
-except Exception as exc:
+# BaseException, not Exception (2026-08-23): SystemExit from _terminate above,
+# and KeyboardInterrupt, must release the backend too. See _terminate().
+except BaseException as exc:
     # Top-level handler added 2026-08-22 -- see notify(). Re-raise after
     # notifying so the exit status and traceback still reach the journal.
     log(f"FAILED: {type(exc).__name__}: {exc}")

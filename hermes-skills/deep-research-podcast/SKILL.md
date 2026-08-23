@@ -283,10 +283,16 @@ turn doesn't have to hold open.
 Check on it with `systemctl --user list-units 'deep-research-podcast-*'` and
 `journalctl --user -u <unit> -f` every 5–10 min during active research turns, or honor a
 user-specified cadence (e.g. "check every 20 minutes").
-Also tail the log file (`/tmp/drp-*.log`) to see what sub-question is in progress —
-the script prints `[HH:MM:SS] researching: '<question>'` and completion markers.
+Also tail the log file — `--detach` prints its path on launch, and it is
+`$DRP_RESULTS_DIR/<unit>.log` (`/tmp/deep-research-podcast-<ts>.log` by default,
+*not* `/tmp/drp-*.log`, which nothing writes — `drp-results-<ts>.json` there is the
+raw research JSON). It shows what sub-question is
+in progress: the script prints `[HH:MM:SS] researching: '<question>'` and
+completion markers.
 
-The pipeline has 5 phases: (1) start llama-research + SearXNG, (2) run OpenResearcher
+The pipeline has 5 phases: (1) preflight — run `DRP_BACKEND_START_CMD` if set
+(typically starting llama-research) and health-check both the LLM and SearXNG,
+aborting if either is unreachable, (2) run OpenResearcher
 per sub-question, (3) stop llama-research the moment research ends, (4) create notebook
 + add sources, (5) trigger podcast generation via `open-notebook-podcast`'s poller.
 Phases 1–2 are the long part (OpenResearcher's multi-turn search loops); phase 5 hands

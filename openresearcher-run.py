@@ -222,6 +222,20 @@ def _page_offset(cursor):
     return cursor * PAGE_CHARS if cursor < PAGE_CHARS else cursor
 
 
+def _next_cursor(cursor):
+    """The cursor value that advances one page, in the SAME convention `cursor`
+    used.
+
+    2026-08-23: both "read further" hints were hard-coded to the ordinal form
+    (`use cursor={cursor + 1}`) even when the model had addressed the page by
+    byte offset. A model that sent `cursor=4000` was told to send `cursor=4001`,
+    which _page_offset() reads as byte 4001 -- the same 4000 characters shifted
+    by one, i.e. exactly the no-op paging that _page_offset() exists to end,
+    reintroduced through the hint text. Advance in whichever unit was asked for.
+    """
+    return cursor + 1 if cursor < PAGE_CHARS else cursor + PAGE_CHARS
+
+
 def tool_open(ident, cursor=0):
     ident = str(ident).strip()
     title = ""
@@ -279,7 +293,7 @@ def tool_open(ident, cursor=0):
     key = (url, offset)
     STATE["opened"][key] = STATE["opened"].get(key, 0) + 1
     if STATE["opened"][key] > 1:
-        nxt = (f"Use cursor={cursor + 1} to read further in this page. "
+        nxt = (f"Use cursor={_next_cursor(cursor)} to read further in this page. "
                if len(page) > offset + PAGE_CHARS else "This page has no more text. ")
         return (f"You have already read {url} at cursor={cursor}; the content is unchanged. "
                 f"{nxt}Or open a different result number, or answer with what you have.")
@@ -293,7 +307,7 @@ def tool_open(ident, cursor=0):
     if len(kept) < SOURCE_TEXT_PER_PAGE:
         SOURCE_TEXT[url] = (kept + ("\n" if kept else "") + chunk)[:SOURCE_TEXT_PER_PAGE]
     more = (f" [truncated — {len(page) - offset - PAGE_CHARS} chars remain, "
-            f"use cursor={cursor + 1}]"
+            f"use cursor={_next_cursor(cursor)}]"
             if len(page) > offset + PAGE_CHARS else "")
     return f"{url}\n\n{chunk}{more}"
 
@@ -343,7 +357,28 @@ def _prune_history(messages):
     tool_idx = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
     if len(tool_idx) <= KEEP_VERBATIM_TOOL_RESULTS:
         return messages
-    stale = set(tool_idx[:-KEEP_VERBATIM_TOOL_RESULTS])
+    # KEEP == 0 means "keep nothing verbatim", and it used to mean the opposite:
+    # `tool_idx[:-0]` is `tool_idx[:0]` is empty, so the knob's most aggressive
+    # value elided NOTHING -- and, since 2026-08-23, also retained every
+    # assistant reasoning block, i.e. exactly the unpruned behaviour this
+    # function exists to replace. Spelled out rather than relying on slice
+    # arithmetic that reads correct and is not (2026-08-23).
+    if KEEP_VERBATIM_TOOL_RESULTS <= 0:
+        stale, keep_from = set(tool_idx), len(messages)
+    else:
+        stale = set(tool_idx[:-KEEP_VERBATIM_TOOL_RESULTS])
+        keep_from = tool_idx[-KEEP_VERBATIM_TOOL_RESULTS]
+    # Tool results were the only thing bounded until 2026-08-23, and they are not
+    # the only thing that grows. Every assistant turn is appended WITH its
+    # reasoning_content (the main loop keeps it deliberately -- it carries the
+    # model's plan), and at TURN_MAX_TOKENS per turn a 120-turn run accumulates
+    # ~144k tokens of reasoning alone: past the 131k window before the system
+    # prompt and the eight verbatim tool results are counted. The invariant this
+    # function promises -- the request never grows past what the server will
+    # accept -- did not hold at the default --max-turns. Older reasoning is the
+    # cheapest thing to drop: it is the model's scratch work about tool calls it
+    # has already made, whose results are themselves already stubbed out here.
+    # The recent working set keeps its reasoning verbatim, same boundary.
     out = []
     for i, m in enumerate(messages):
         if i in stale and not m.get("_elided"):
@@ -352,6 +387,9 @@ def _prune_history(messages):
                         f"[earlier tool result elided to stay within the context "
                         f"window: {first[0][:120] if first else '(empty)'}]",
                         "_elided": True})
+        elif (i < keep_from and m.get("role") == "assistant"
+              and m.get("reasoning_content")):
+            out.append({k: v for k, v in m.items() if k != "reasoning_content"})
         else:
             out.append(m)
     return out
@@ -571,8 +609,19 @@ def resolve_answer(messages, question, natural=None):
     reliable route but costs a call on another model. force_answer() is kept for
     the single-endpoint case, where it is the only thing left to try.
     """
-    # The grounding gate, before any of it: no page read means anything produced
-    # here is recall, not research. See the long note in the git history.
+    # THE grounding gate (2026-08-22), before any of it. SOURCES is populated
+    # only by a browser.open that actually returned readable text, so an empty
+    # SOURCES means no page was read and any prose produced from here on is
+    # recalled, not researched. Every other check in this file asks whether the
+    # answer LOOKS usable; nothing asked whether it could possibly be grounded,
+    # and a zero-source run reported `budget_spent: False` -- a natural
+    # conclusion, the most successful-looking outcome this script can emit. That
+    # is the measured Gemma-4-26B-A4B behaviour in README.md ("search, search,
+    # search, stop -> answer from memory"), and downstream it becomes podcast
+    # narration indistinguishable from real research. Refuse to launder it: say
+    # plainly that nothing was read, and let the pipeline drop the sub-question.
+    # Lives here, not in force_answer(): this is the one place every answer
+    # route passes through.
     if not SOURCES:
         STATE["synthesized"] = False
         print("[answer] refusing: no source was successfully read, so any answer would "
@@ -587,7 +636,19 @@ def resolve_answer(messages, question, natural=None):
         written = synthesize(question)
         if written:
             return written
-    forced = force_answer(messages)
+    # Guarded like synthesize() above, and for the same reason: everything below
+    # this point is the "the run still produced sources, say so honestly" path,
+    # and letting an LLM failure here propagate throws that away along with the
+    # whole sub-question. chat() re-raises on any 4xx -- including the 400 an
+    # over-long context returns, and this call asks for ANSWER_MAX_TOKENS on top
+    # of a window that a 120-turn run has already filled -- and raises
+    # RuntimeError after three attempts on 5xx. Fourth recurrence of the
+    # "completed work must survive a later failure" class; see CLAUDE.md.
+    try:
+        forced = force_answer(messages)
+    except Exception as exc:
+        print(f"[answer] force_answer failed ({exc}); falling back", file=sys.stderr)
+        forced = ""
     if _usable_answer(forced):
         return forced
     if SYNTH_LLM == LLM:
@@ -630,19 +691,11 @@ def force_answer(messages):
     And none of the three guards -- empty, repetitive, tool-call syntax -- has
     anything to say about the failure that matters most here: a fluent,
     well-structured, entirely ungrounded answer written from the model's own
-    memory. That is checked first, before the call is even made.
+    memory. This function does NOT check that; its only caller, resolve_answer(),
+    gates on it before calling. Anything else that calls this must gate too --
+    the guard used to be described here, which made it look like this function
+    owned it (comment corrected 2026-08-23).
     """
-    # THE grounding gate (2026-08-22). SOURCES is populated only by a
-    # browser.open that actually returned readable text, so an empty SOURCES
-    # means no page was read and any prose the model produces here is recalled,
-    # not researched. Every other check in this file asks whether the answer
-    # LOOKS usable; nothing asked whether it could possibly be grounded, and a
-    # zero-source run reported `budget_spent: False` -- a natural conclusion,
-    # the most successful-looking outcome this script can emit. That is the
-    # measured Gemma-4-26B-A4B behaviour in README.md ("search, search, search,
-    # stop -> answer from memory"), and downstream it becomes podcast narration
-    # indistinguishable from real research. Refuse to launder it: say plainly
-    # that nothing was read, and let the pipeline drop the sub-question.
     msgs = messages + [{"role": "assistant", "content": "Final answer, no tool calls:"}]
     # ANSWER_MAX_TOKENS, not the tool-turn budget. Until 2026-08-22 this call
     # shared the 1200-token cap sized for "emit one tool call", and on a
@@ -654,10 +707,21 @@ def force_answer(messages):
     choice = chat(msgs, use_tools=False, stop=["<tool_call>"], temperature=0.3,
                   max_tokens=ANSWER_MAX_TOKENS)
     content = _strip_reasoning(choice["message"])
-    if choice.get("finish_reason") == "length":
+    if choice.get("finish_reason") == "length" and content:
         # Never checked until 2026-08-22: an answer cut off mid-sentence was
         # accepted as complete and shipped to the episode. Flag it in-band
         # rather than discarding real synthesis over it.
+        #
+        # `and content` added 2026-08-23: without it, the documented empty-content
+        # failure (a reasoning model spends the whole cap inside reasoning_content
+        # and returns finish_reason="length" with no answer text at all) made the
+        # NOTE ITSELF the answer -- non-empty, no tool-call syntax, one sentence,
+        # so _usable_answer() accepted it and the run reported grounded and
+        # synthesized. The episode then narrated a sub-question whose entire body
+        # was "[Note: this synthesis was cut off...]". An empty answer must fall
+        # through to the "say which failure fired" path below, exactly as it does
+        # when finish_reason is anything else. synthesize() has always guarded
+        # this the same way.
         print("[force_answer] answer hit the token limit and may be truncated",
               file=sys.stderr)
         content = (content + "\n\n[Note: this synthesis was cut off by the answer token "
@@ -932,7 +996,24 @@ def main():
                 args_ = {}
             if not args.json:
                 print(f"[turn {turn}] {fn}({json.dumps(args_)[:90]})", file=sys.stderr)
-            out = DISPATCH.get(fn, lambda a: f"Unknown tool {fn}")(args_)
+            # Guarded 2026-08-23. Tool dispatch returns an error STRING as tool
+            # output rather than raising -- the invariant every dispatch function
+            # already honours internally (tool_search's "Search failed: ...").
+            # The call itself did not: this script has no top-level handler, so
+            # a TypeError here exits non-zero and the pipeline's run_research()
+            # logs and skips the sub-question, throwing away every turn of
+            # research that had already succeeded. And the arguments are model
+            # output, not ours: a JSON string `"1"` for cursor -- a shape models
+            # emit despite the schema -- raises in _page_offset()'s comparison,
+            # and a string topn raises on the results slice. Telling the model
+            # what it got wrong lets it retry; crashing costs the whole run.
+            try:
+                out = DISPATCH.get(fn, lambda a: f"Unknown tool {fn}")(args_)
+            except Exception as exc:
+                out = (f"{fn} failed: {type(exc).__name__}: {exc}. Check the "
+                       f"argument types (cursor and topn must be integers, not "
+                       f"strings) and try again.")
+                print(f"[turn {turn}] {fn} raised: {exc}", file=sys.stderr)
             messages.append({"role": "tool", "tool_call_id": c.get("id", ""),
                              "content": out[:TOOL_RESULT_CHARS]})
     # Do NOT just give up. This model was post-trained on 96K trajectories of

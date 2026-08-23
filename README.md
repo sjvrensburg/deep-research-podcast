@@ -638,6 +638,92 @@ discarded on exactly the runs that "succeeded" without synthesizing anything.
 Those diagnostics now surface in the pipeline log, which is how the eighth bug
 was spotted in seconds rather than after a 35-minute re-run.
 
+## Four more, found by code review on 2026-08-23
+
+None of these had fired in a run yet; all four are the same shapes as the bugs
+above, caught before they cost an episode.
+
+**A truncated answer that was truncated to nothing became the answer.** When a
+reasoning model spends its whole `max_tokens` inside `reasoning_content`, the
+response comes back `finish_reason: "length"` with *empty* content — a
+documented, measured failure mode of this stack. `force_answer()` appended its
+"[Note: this synthesis was cut off...]" flag unconditionally, so the note became
+the entire answer: non-empty, no tool-call syntax, one sentence, therefore
+accepted by `_usable_answer()` and reported as `grounded: true, synthesized:
+true`. The episode would have narrated a sub-question whose complete body was a
+truncation notice. The note is now only appended to real text; an empty answer
+falls through to the "say which failure fired" path, exactly as `synthesize()`
+has always handled it.
+
+**An LLM failure in `force_answer()` destroyed the sub-question it was meant to
+rescue.** `resolve_answer()` guarded `synthesize()` but called `force_answer()`
+bare, and everything below that call is the honest "research read these sources,
+here they are" fallback. `chat()` re-raises on any 4xx — including the 400 an
+over-long context returns, and this call asks for `DRP_ANSWER_MAX_TOKENS` on top
+of a window a 120-turn run has already filled — so the most likely failure at
+the end of the longest runs threw away the whole sub-question instead of
+degrading. Fourth recurrence of "completed work must survive a later failure".
+
+**The paging hint told the model to re-read the same paragraph.** `_page_offset()`
+accepts both cursor conventions (small ordinals, or byte offsets at or above
+`PAGE_CHARS`) because the model emits both. Both "read further" hints were
+hard-coded to the ordinal form: a model that had sent `cursor=4000` was told to
+send `cursor=4001`, which reads back as byte 4001 — the same 4000 characters
+shifted by one. That is precisely the no-op paging `_page_offset()` was written
+to end, reintroduced through the hint text. `_next_cursor()` now advances in
+whichever unit was asked for.
+
+**Pruning bounded tool results, and tool results were not the only thing
+growing.** Every assistant turn is appended with its `reasoning_content` —
+deliberately, it carries the model's plan — and nothing ever elided it. At 1200
+tokens per turn a 120-turn run accumulates ~144,000 tokens of reasoning alone,
+past the 131,072-token window before the system prompt and the eight verbatim
+tool results are counted, so the context-window fix above did not actually hold
+at the default `--max-turns`. `_prune_history()` now drops `reasoning_content`
+from assistant turns older than the recent working set: scratch work about tool
+calls whose results are themselves already stubbed out. A 40-turn synthetic
+history shrinks by more than half with the message sequence intact.
+
+Five smaller ones from the same review:
+
+- **Tool dispatch could raise, and this script has no top-level handler.** Every
+  dispatch function degrades internally (`tool_search` returns `"Search
+  failed: ..."` as tool output), but the call itself was unguarded — and its
+  arguments are model output. A JSON string `"1"` for `cursor`, a shape models
+  emit despite the schema, raises a `TypeError` in `_page_offset()`'s
+  comparison; a string `topn` raises on the results slice. Either exits
+  non-zero, and the pipeline's `run_research()` logs and skips the
+  sub-question — every turn already completed, discarded over one malformed
+  argument. The call site now returns the error as tool output, naming the
+  argument types, so the model can retry.
+- **`DRP_KEEP_TOOL_RESULTS=0` turned pruning off rather than all the way up.**
+  `tool_idx[:-0]` is `tool_idx[:0]` is empty, so the knob's most aggressive
+  value elided nothing and (after the reasoning fix above) retained every
+  reasoning block: the exact unpruned behaviour, from the setting that looks
+  like the strictest one. Measured across the knob now: 0 → 10/10 tool results
+  stubbed and no reasoning kept; 8 (default) → 2/10 stubbed, 7 reasoning blocks
+  kept; system prompt and message sequence intact at every value.
+- **Signals bypassed the backend release.** The top-level handler caught
+  `Exception`, and the likeliest early end for one of these runs is not an
+  exception: runs are launched as transient systemd units, so `systemctl --user
+  stop <unit>` sends SIGTERM, which by default terminates with nothing unwound —
+  no `release_research_backend()`, no failure notification, and a multi-GB model
+  left resident to be OOM-killed and restarted in a loop. SIGTERM and SIGHUP now
+  raise `SystemExit`, and the handler catches `BaseException`, so Ctrl-C is
+  covered too. Verified live: SIGTERM exits 1 and SIGINT exits 130, both running
+  the stop command and the notifier.
+- **The grounding-gate comment described a guard its function did not have.**
+  The long `# THE grounding gate` block sat in `force_answer()`, whose docstring
+  said the ungrounded case "is checked first, before the call is even made" —
+  true only because its one caller gates first. The block now lives on the
+  actual check in `resolve_answer()`, the one place every answer route passes
+  through.
+- **The Hermes skill's monitoring instructions pointed at a file nothing
+  writes.** It said to tail `/tmp/drp-*.log`; `--detach` writes
+  `$DRP_RESULTS_DIR/deep-research-podcast-<ts>.log`. An agent following the
+  skill saw no progress at all. Its phase list also still said phase 1 starts
+  SearXNG, contradicting the correction a few lines above it.
+
 ## Verified end to end
 
 Second run, after all of the above, same two sub-questions:

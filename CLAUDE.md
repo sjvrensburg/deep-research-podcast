@@ -138,7 +138,10 @@ fail fast on other 4xx; every Open Notebook `POST` is individually guarded, as i
 appends each result as it completes (never a list comprehension) and skips failed
 sub-questions; results are persisted to `RESULTS_DIR` *before* any Open Notebook call,
 and that write is itself guarded; tool dispatch functions return an error *string* as
-tool output rather than raising. Every exit path notifies — `notify()` is called from the
+tool output rather than raising, and the dispatch *call site* is guarded too (the
+arguments are model output). SIGTERM/SIGHUP raise `SystemExit` and the top-level
+handler catches `BaseException`, so `systemctl --user stop` on a detached run still
+releases the backend and notifies. Every exit path notifies — `notify()` is called from the
 top-level handler with `job_id=failed`, not only on success — and every exit path
 releases the research backend. `release_research_backend()` is idempotent and gated on
 `RUN["backend_started"]` (set before `DRP_BACKEND_START_CMD` runs), so a preflight that
