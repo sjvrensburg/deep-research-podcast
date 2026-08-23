@@ -159,10 +159,17 @@ Don't try to substitute a different model into this pipeline silently.
 **What the pipeline starts, and what it doesn't.** It runs `DRP_BACKEND_START_CMD` if you set
 one, and `DRP_BACKEND_STOP_CMD` when research ends (on every exit path, including failure).
 That is all. It does **not** start SearXNG — it health-checks it and aborts if unreachable —
-and it does **not** start any TTS server. If your episode profile is backed by an on-demand
-TTS service, start that yourself before launching: Open Notebook fails at the synthesis step,
-*after* the outline and transcript LLM calls have run, which is an expensive way to discover a
-stopped service.
+and it does **not** start any TTS server.
+
+If your episode profile is backed by an on-demand TTS service, something must bring it up, or
+Open Notebook fails at the synthesis step — *after* the outline and transcript LLM calls have
+run, which is an expensive way to discover a stopped service. **Do that at synthesis time, not
+before launching.** Research runs for an hour or more before the first clip is generated, and a
+TTS server held across all of it wastes gigabytes for nothing. The natural place is the poller
+you attach via `DRP_POLLER_CMD`: it is already running for the duration of generation and
+nothing else in the chain has that lifetime. On the origin box the poller does exactly this,
+acquiring a reference-counted lease on the TTS service and releasing it on every exit path, so
+concurrent jobs cannot tear the server out from under each other.
 
 ## 4. Launch the pipeline in the background — never block the turn
 
