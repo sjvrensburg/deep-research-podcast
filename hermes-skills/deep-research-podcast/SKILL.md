@@ -1,7 +1,7 @@
 ---
 name: deep-research-podcast
 description: "USE THIS (not open-notebook-podcast) whenever the user asks for deep research, a deep dive, an intensive or thorough investigation, or names this skill explicitly. OpenResearcher-driven multi-turn web research fed into an Open Notebook podcast -- scales from a short single-episode demo to an intensive multi-hour, multi-question deep dive; can also ground an episode directly in an attached document."
-version: 0.3.0
+version: 0.3.1
 author: Stefan (sjvrensburg), Hermes Agent
 license: MIT
 platforms: [linux]
@@ -171,6 +171,7 @@ terminal(
     DRP_SYNTH_LLM_URL=http://127.0.0.1:8088/v1/chat/completions \
     DRP_BACKEND_START_CMD='systemctl --user start llama-research' \
     DRP_BACKEND_STOP_CMD='systemctl --user stop llama-research' \
+    DRP_POLLER_CMD=~/.hermes/skills/research/open-notebook-podcast/scripts/poll_and_notify.sh \
     python3 ~/Projects/deep-research-podcast/deep-research-podcast.py --detach \
     --episode-name \"<title>\" --notebook-name \"<name>\" \
     --max-turns 120 --deliver-target signal \
@@ -180,7 +181,16 @@ terminal(
 ```
 
 It prints `detached as deep-research-podcast-<ts>` and a log path; report that to
-the user and stop. The equivalent explicit `systemd-run` form below still works
+the user and stop.
+
+`DRP_POLLER_CMD` is what actually tells the user the episode is ready. Without it
+the pipeline prints the job id and exits and nobody is notified -- 2026-08-22: a
+run researched 44 sources, synthesized all four sub-questions and produced a
+24-minute episode overnight, and the user was never told, because no poller was
+attached. The script receives `job_id episode_name deliver_target`, exactly
+`poll_and_notify.sh`'s signature, and since the same date it is invoked on
+FAILURE too (`job_id=failed`), so a dead run reports itself instead of going
+silent. The equivalent explicit `systemd-run` form below still works
 and is what `--detach` does internally.
 
 Launch it as a **transient systemd unit** via a foreground `terminal` call. Do NOT use
@@ -201,6 +211,7 @@ terminal(
     --setenv=DRP_SYNTH_LLM_URL=http://127.0.0.1:8088/v1/chat/completions \
     --setenv=DRP_BACKEND_START_CMD=\"systemctl --user start llama-research\" \
     --setenv=DRP_BACKEND_STOP_CMD=\"systemctl --user stop llama-research\" \
+    --setenv=DRP_POLLER_CMD=$HOME/.hermes/skills/research/open-notebook-podcast/scripts/poll_and_notify.sh \
     python3 <path-to-this-repo>/deep-research-podcast.py \
     --episode-name \"<descriptive episode title>\" \
     --notebook-name \"<short notebook name>\" \
