@@ -1,7 +1,7 @@
 ---
 name: deep-research-podcast
 description: "USE THIS (not open-notebook-podcast) whenever the user asks for deep research, a deep dive, an intensive or thorough investigation, or names this skill explicitly. OpenResearcher-driven multi-turn web research fed into an Open Notebook podcast -- scales from a short single-episode demo to an intensive multi-hour, multi-question deep dive; can also ground an episode directly in an attached document."
-version: 0.3.1
+version: 0.3.2
 author: Stefan (sjvrensburg), Hermes Agent
 license: MIT
 platforms: [linux]
@@ -155,6 +155,14 @@ systemctl --user list-unit-files | grep llama-research
 If either is missing, this deep-research path isn't set up on this box — tell the
 user and suggest `open-notebook-podcast` instead (it doesn't need OpenResearcher).
 Don't try to substitute a different model into this pipeline silently.
+
+**What the pipeline starts, and what it doesn't.** It runs `DRP_BACKEND_START_CMD` if you set
+one, and `DRP_BACKEND_STOP_CMD` when research ends (on every exit path, including failure).
+That is all. It does **not** start SearXNG — it health-checks it and aborts if unreachable —
+and it does **not** start any TTS server. If your episode profile is backed by an on-demand
+TTS service, start that yourself before launching: Open Notebook fails at the synthesis step,
+*after* the outline and transcript LLM calls have run, which is an expensive way to discover a
+stopped service.
 
 ## 4. Launch the pipeline in the background — never block the turn
 
