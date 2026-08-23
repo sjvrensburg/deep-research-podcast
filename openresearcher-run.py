@@ -1013,7 +1013,11 @@ def main():
                 out = (f"{fn} failed: {type(exc).__name__}: {exc}. Check the "
                        f"argument types (cursor and topn must be integers, not "
                        f"strings) and try again.")
-                print(f"[turn {turn}] {fn} raised: {exc}", file=sys.stderr)
+                # "[tool]" prefix, not "[turn N]": the pipeline echoes child
+                # stderr only for a known set of diagnostic prefixes, so a
+                # "[turn N]" line here would be captured and dropped -- the
+                # exact silent-diagnostics failure that cost a 35-minute run.
+                print(f"[tool] turn {turn}: {fn} raised: {exc}", file=sys.stderr)
             messages.append({"role": "tool", "tool_call_id": c.get("id", ""),
                              "content": out[:TOOL_RESULT_CHARS]})
     # Do NOT just give up. This model was post-trained on 96K trajectories of

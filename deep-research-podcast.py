@@ -319,7 +319,7 @@ def run_research(question, max_turns):
     # cost a full 35-minute two-question run to rediagnose by hand.
     for line in (proc.stderr or "").splitlines():
         if line.startswith(("[force_answer]", "[synthesize]", "[enrich]", "[answer]",
-                            "[chat]")):
+                            "[chat]", "[tool]")):
             log(f"     {line}")
     # THE grounding gate, pipeline side (2026-08-22). `sources` counts pages the
     # model actually opened and read, and until now it was only ever LOGGED --
