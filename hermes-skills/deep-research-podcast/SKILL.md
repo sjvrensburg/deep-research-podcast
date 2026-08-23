@@ -109,6 +109,24 @@ required — skipping either recreates a documented failure:
    the output to a file — the pipeline reads it from disk, not from your
    context.
 
+   **Conversion takes minutes, and a tool-call timeout is not a stall.** On the
+   origin box marker takes ~3.5 minutes idle and ~20 under load, against a
+   60-second default timeout on foreground shell calls — so launch it detached
+   and poll, exactly as you do the pipeline itself. An agent that read the
+   timeout as a hang converted the PDF itself on 2026-08-23 and passed its own
+   transcription off as the document. If conversion genuinely fails, stop and
+   tell the user: never substitute another extractor, and never transcribe it
+   yourself. A transcription can silently alter an equation or a number, and it
+   carries real markdown structure, so nothing downstream can tell.
+
+   **Set `DRP_DOC_VERIFY_CMD` if your converter can prove what it produced.**
+   The pipeline runs it as `CMD <path>` against `--source-document` and refuses
+   the run on a non-zero exit — including when the verifier is missing or hangs.
+   On the origin box the converter wrapper writes a checksummed sidecar and the
+   verifier checks it; anything that answers "did this really come from the
+   converter" works. Without it, the launch commands below are trusting whoever
+   assembled them.
+
    **marker writes `<output_dir>/<stem>/<stem>.md`, not `<output_dir>/<stem>.md`.**
    Resolve the real path and check it is non-empty before going any further:
 
@@ -187,6 +205,7 @@ terminal(
     DRP_BACKEND_START_CMD='systemctl --user start llama-research' \
     DRP_BACKEND_STOP_CMD='systemctl --user stop llama-research' \
     DRP_POLLER_CMD=~/.hermes/skills/research/open-notebook-podcast/scripts/poll_and_notify.sh \
+    DRP_DOC_VERIFY_CMD=\"<your converter's verifier> <path>\" \
     python3 ~/Projects/deep-research-podcast/deep-research-podcast.py --detach \
     --episode-name \"<title>\" --notebook-name \"<name>\" \
     --max-turns 120 --deliver-target signal \
@@ -227,6 +246,7 @@ terminal(
     --setenv=DRP_BACKEND_START_CMD=\"systemctl --user start llama-research\" \
     --setenv=DRP_BACKEND_STOP_CMD=\"systemctl --user stop llama-research\" \
     --setenv=DRP_POLLER_CMD=$HOME/.hermes/skills/research/open-notebook-podcast/scripts/poll_and_notify.sh \
+    --setenv=DRP_DOC_VERIFY_CMD=\"<your converter's verifier>\" \
     python3 <path-to-this-repo>/deep-research-podcast.py \
     --episode-name \"<descriptive episode title>\" \
     --notebook-name \"<short notebook name>\" \

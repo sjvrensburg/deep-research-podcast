@@ -46,7 +46,9 @@ if unset), `DRP_POLLER_CMD` (notification handoff, now fired on failure too),
 rails, all with working defaults: `DRP_KEEP_TOOL_RESULTS`, `DRP_ANSWER_MAX_TOKENS`,
 `DRP_RESEARCH_TIMEOUT`, `DRP_POLLER_TIMEOUT`, `DRP_RESULTS_DIR`,
 `DRP_ENRICH_LLM_URL`, `DRP_ENRICH_MAX_TOKENS`, `DRP_SYNTH_LLM_URL`,
-`DRP_SOURCE_TEXT_PER_PAGE`, `DRP_SOURCE_TEXT_TOTAL`.
+`DRP_SOURCE_TEXT_PER_PAGE`, `DRP_SOURCE_TEXT_TOTAL`, `DRP_DOC_VERIFY_CMD`
+(run as `CMD <path>` against `--source-document`; the run aborts unless it exits 0,
+and also if it is missing or hangs -- the gate fails closed on purpose).
 
 Local stack (verified 2026-08-22): SearXNG and Open Notebook run persistently;
 `llama-research.service` (OpenResearcher, port 8085, `--ctx-size 131072`) is on-demand
@@ -118,6 +120,16 @@ it. Do not simplify these away:
   raises if nothing usable is left. A sourceless section handed to the transcript model
   is a topic with no evidence under a briefing demanding specifics — a fabrication
   generator, not a thin section.
+- `verify_source_document()` gates `--source-document` behind `DRP_DOC_VERIFY_CMD`
+  when one is set. Three times in two days the converted document at the path
+  everything downstream reads was not what it claimed to be -- twice `pdftotext`
+  output in the converter's own output path, once an agent's own transcription
+  after it wrongly decided the converter had stalled. That last shape defeats every
+  content-based check: an LLM transcription has headings, tables and math, and can
+  silently alter an equation in a document the episode then narrates as the user's
+  paper. Each earlier fix was an instruction in a skill file; each was followed by
+  an agent that did not follow it. It is a command rather than a built-in rule
+  because this script does not convert documents and must not assume a converter.
 - `tool_open()` banks a URL in `SOURCES` only after a text content-type *and* at least
   `MIN_SOURCE_CHARS` of extracted text. A PDF or cookie wall that fetches fine is not a
   source; counting it produces a citation list for pages nothing read.

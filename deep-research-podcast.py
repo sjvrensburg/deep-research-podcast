@@ -106,6 +106,14 @@ USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) halo-prep/1.0"
 # the sub-question, since the child's answer only existed on its stdout at exit.
 RESEARCH_TIMEOUT = int(os.environ.get("DRP_RESEARCH_TIMEOUT", "10800"))
 RESULTS_DIR = os.environ.get("DRP_RESULTS_DIR", "/tmp")
+# Optional gate on --source-document: a command that is run as `CMD <path>` and
+# must exit 0 for the run to proceed. Unset by default -- this script has no
+# opinion about where a document came from and no knowledge of any particular
+# converter. Set it to whatever answers "is this really what it claims to be" on
+# your box (see README.md's --source-document section) and the answer becomes an
+# exit code instead of an instruction someone has to remember. Added 2026-08-23
+# after the third document-substitution incident in two days.
+DOC_VERIFY_CMD = os.environ.get("DRP_DOC_VERIFY_CMD", "")
 # A poller that hangs must not hold the run open indefinitely.
 POLLER_TIMEOUT = int(os.environ.get("DRP_POLLER_TIMEOUT", "14400"))
 # Populated by main() as soon as arguments are parsed, so the top-level failure
@@ -475,6 +483,55 @@ def trigger_podcast(content, episode_name, briefing_suffix, profile, speakers):
     return job_id
 
 
+def verify_source_document(path):
+    """Gate --source-document behind DRP_DOC_VERIFY_CMD, if one is configured.
+
+    Added 2026-08-23, after the third document-substitution incident in two
+    days. The pattern is always the same: the converted document at the path
+    everything downstream reads is not what it claims to be. Twice it was plain
+    `pdftotext` output written into the converter's own output path; the third
+    time an agent decided the converter had stalled -- it had not, it finished
+    twenty minutes later -- and transcribed the PDF itself. That last one is the
+    dangerous shape: an LLM transcription carries real headings, tables and
+    math, so no check on the CONTENT can tell it from a real extraction, and it
+    can silently alter an equation or a number in a document this pipeline then
+    narrates as the user's own paper.
+
+    Every previous fix was an instruction in a skill file saying to check first,
+    and each was followed by an agent that did not. So the check moves here,
+    where it is an exit code rather than a paragraph.
+
+    Deliberately a COMMAND, not a built-in rule: this script does not convert
+    documents, has no knowledge of any particular converter, and must stay
+    usable on a box with a different one. It asks a question and honours the
+    answer.
+
+    Fails CLOSED, and that is the whole point. An unset variable means no gate
+    was asked for and the document passes -- but once one is configured, a
+    verifier that is missing, unrunnable, or slow is a verification that did not
+    happen, and this refuses on all three. A gate that opens when it breaks is
+    not a gate.
+    """
+    if not DOC_VERIFY_CMD:
+        return
+    log(f"verifying source document with {DOC_VERIFY_CMD!r}...")
+    try:
+        proc = subprocess.run(shlex.split(DOC_VERIFY_CMD) + [path],
+                              capture_output=True, text=True, timeout=120)
+    except Exception as e:
+        raise RuntimeError(
+            f"--source-document verification could not run ({type(e).__name__}: {e}). "
+            f"DRP_DOC_VERIFY_CMD is set, so this run requires a verified document and "
+            f"cannot assume one. Fix the verifier or unset the variable deliberately.")
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()[-1500:]
+        raise RuntimeError(
+            f"--source-document {path!r} FAILED verification (exit {proc.returncode}). "
+            f"Refusing to narrate a document whose provenance could not be confirmed.\n"
+            f"{detail}")
+    log("  source document verified")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("questions", nargs="+", help="one or more research sub-questions")
@@ -543,6 +600,7 @@ def main():
 
     document = None
     if args.source_document:
+        verify_source_document(args.source_document)
         with open(args.source_document, encoding="utf-8") as f:
             doc_text = f.read().strip()
         if not doc_text:

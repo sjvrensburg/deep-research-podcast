@@ -724,6 +724,35 @@ Five smaller ones from the same review:
   skill saw no progress at all. Its phase list also still said phase 1 starts
   SearXNG, contradicting the correction a few lines above it.
 
+## Verifying what `--source-document` actually is
+
+`DRP_DOC_VERIFY_CMD`, added 2026-08-23. If set, it is run as `CMD <path>` against
+`--source-document` before the file is read, and the run aborts unless it exits 0.
+
+The failure it exists for happened three times in two days, and never inside this
+repo: the converted document sitting at the path everything downstream reads was
+not what it claimed to be. Twice it was plain `pdftotext` output written into the
+converter's own output directory. The third time an agent decided the converter had
+stalled — it had not; it finished twenty minutes later — and transcribed the PDF
+itself, then said so.
+
+That third shape is the one worth building against. A transcription carries real
+headings, tables and display math, so no check on the *content* can distinguish it
+from a genuine extraction, and unlike shredded layout it can quietly change an
+equation or a number in a document this pipeline goes on to narrate as the user's
+own paper. The answer is provenance rather than shape — on the origin box, a
+converter wrapper writes a checksummed sidecar and the verifier checks it — but
+that belongs to whatever converts documents, not here. This script only asks the
+question and honours the answer.
+
+It fails **closed**: once configured, a verifier that is missing, unrunnable or
+slow aborts the run exactly as a failed check does. A verification that did not
+happen is not a pass, and a gate that opens when it breaks is not a gate. Unset
+(the default) means no gate was asked for and nothing changes.
+
+Every earlier attempt at this was a paragraph in a skill file telling an agent to
+check first, and each was followed by an agent that did not.
+
 ## Verified end to end
 
 Second run, after all of the above, same two sub-questions:
