@@ -791,6 +791,40 @@ as before, minus the traceback.
 
 Fifth recurrence of "completed work must survive a later failure".
 
+## Citing what the write-up actually rests on
+
+`synthesize()` writes from `SOURCE_TEXT` up to `DRP_SOURCE_TEXT_TOTAL` (60,000
+chars by default) and stops there. On a productive question that cap bites hard:
+a 2026-08-24 run read 24 sources for one sub-question and only 10 reached the
+writer. All 24 were then listed under the episode's "sources consulted".
+
+Fourteen of those citations were for pages no sentence of the write-up could have
+seen. The researcher did read them — the claim was not false — but it was the
+stronger claim than the material supported, in a repo whose whole argument is that
+"sources" means pages actually read and written from. So each source now carries
+`used`, and the episode lists the two groups separately: "sources consulted for
+this question", and "also read, but not part of the write-up above (do not
+attribute claims to these)".
+
+## A section can be honestly short
+
+The same run produced a 366-character section from 24 sources, next to a
+4,542-character one from 13. Nothing was broken: the question was the historical
+lineage of a field only months old, and the writer is instructed to say when the
+excerpts do not settle something rather than fill the gap. It declined to pad, and
+that was correct.
+
+The problem is what the briefing then tells the episode model — cover every
+question "in real depth", name specific papers and organizations. Aimed at two
+sentences, that is an instruction to invent the depth.
+
+A minimum-length gate was the obvious fix and the wrong one: it would drop exactly
+the honest-thin case and reward a writer that padded. Instead, a section below
+`DRP_THIN_SECTION_CHARS` (1,200) carries a note into the content telling the
+narrators to cover it briefly, not to expand it, and that thin evidence is itself
+the finding. The default briefing's demand is overridden where it does not apply,
+and nowhere else.
+
 ## Verified end to end
 
 Second run, after all of the above, same two sub-questions:

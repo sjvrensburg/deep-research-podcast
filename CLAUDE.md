@@ -46,7 +46,8 @@ if unset), `DRP_POLLER_CMD` (notification handoff, now fired on failure too),
 rails, all with working defaults: `DRP_KEEP_TOOL_RESULTS`, `DRP_ANSWER_MAX_TOKENS`,
 `DRP_RESEARCH_TIMEOUT`, `DRP_POLLER_TIMEOUT`, `DRP_RESULTS_DIR`,
 `DRP_ENRICH_LLM_URL`, `DRP_ENRICH_MAX_TOKENS`, `DRP_SYNTH_LLM_URL`,
-`DRP_SOURCE_TEXT_PER_PAGE`, `DRP_SOURCE_TEXT_TOTAL`, `DRP_DOC_VERIFY_CMD`
+`DRP_SOURCE_TEXT_PER_PAGE`, `DRP_SOURCE_TEXT_TOTAL`, `DRP_THIN_SECTION_CHARS`,
+`DRP_DOC_VERIFY_CMD`
 (run as `CMD <path>` against `--source-document`; the run aborts unless it exits 0,
 and also if it is missing or hangs -- the gate fails closed on purpose).
 
@@ -69,7 +70,8 @@ there, and `force_answer()` / `enrich_question()` print why a fallback fired.
 
 The interface between the two scripts is **one JSON object on the last line of
 `openresearcher-run.py --json`'s stdout**: `{question, answer, sources, turns_used,
-budget_spent, grounded, synthesized}` (plus `researched_as` when enrichment rewrote the
+budget_spent, grounded, synthesized}` (each source carries `used`: whether its text
+reached the writer, or was cut by `DRP_SOURCE_TEXT_TOTAL`) (plus `researched_as` when enrichment rewrote the
 question). Anything else printed must go to stderr, or `run_research()` breaks.
 `grounded` is false when no source was read; `synthesized` is false when `answer` is
 `force_answer()`'s canned fallback rather than research prose. The pipeline gates on both
@@ -130,6 +132,17 @@ it. Do not simplify these away:
   paper. Each earlier fix was an instruction in a skill file; each was followed by
   an agent that did not follow it. It is a command rather than a built-in rule
   because this script does not convert documents and must not assume a converter.
+- **"Read" and "written from" are different claims, and the episode must make the
+  weaker one.** `synthesize()` records which URLs actually reached the writer;
+  `build_podcast_content()` lists those as "sources consulted" and the rest under
+  "also read, but not part of the write-up". The cap cut 14 of 24 on one real
+  question while all 24 were cited.
+- **A thin section is marked, never dropped.** Below `DRP_THIN_SECTION_CHARS` the
+  section carries a note telling the narrators to cover it briefly and not expand it.
+  On a topic months old there may genuinely be little to say, and the writer is told
+  to say so rather than fill the gap -- but the global briefing demands "real depth"
+  and specifics, which aimed at a two-sentence section is an instruction to invent.
+  Dropping such a section instead would hide a real finding and reward padding.
 - `tool_open()` banks a URL in `SOURCES` only after a text content-type *and* at least
   `MIN_SOURCE_CHARS` of extracted text. A PDF or cookie wall that fetches fine is not a
   source; counting it produces a citation list for pages nothing read.

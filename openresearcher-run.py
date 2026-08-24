@@ -113,7 +113,11 @@ STATE = {"results": [], "page": "", "url": "", "opened": {}, "catalog": {}, "nex
          # of real synthesis. Reported as "synthesized" in --json so the
          # pipeline can tell a researched answer from an honest apology --
          # both are plain strings and were indistinguishable until 2026-08-22.
-         "synthesized": True}
+         "synthesized": True,
+         # URLs whose text actually reached the writer in synthesize(). Empty
+         # until synthesis runs, and it may be a strict subset of SOURCES when
+         # SOURCE_TEXT_TOTAL cuts the tail -- see _emit()'s `used` flag.
+         "synthesis_sources": []}
 # Ordered (insertion order = citation order) map of url -> title, populated by
 # tool_open. This, not STATE["results"] (every search hit) or STATE["opened"]
 # (keyed by (url, cursor), so one URL appears N times if paged through), is
@@ -600,6 +604,13 @@ def synthesize(question):
     if not SOURCE_TEXT:
         return ""
     parts, total = [], 0
+    # Which URLs actually reached the writer, in order. The cap below can drop
+    # most of them -- 14 of 24 on one question of a 2026-08-24 run -- and until
+    # then nothing downstream could tell: every source the researcher OPENED was
+    # listed under the episode's "sources consulted", including the ones no
+    # sentence of the write-up could possibly rest on. "Read" and "written from"
+    # are different claims and the episode was making the stronger one.
+    STATE["synthesis_sources"] = []
     for i, (url, text) in enumerate(SOURCE_TEXT.items(), 1):
         title = SOURCES.get(url) or "(untitled)"
         block = f"SOURCE {i} -- {title} ({url})\n{text}"
@@ -613,6 +624,7 @@ def synthesize(question):
                   "excluded from the write-up", file=sys.stderr)
             break
         parts.append(block)
+        STATE["synthesis_sources"].append(url)
         total += len(block)
     msgs = [
         {"role": "system", "content": (
@@ -882,7 +894,13 @@ def enrich_question(question):
 
 
 def _emit(question, answer, turns_used, budget_spent, as_json, researched_as=None):
-    sources = [{"url": u, "title": t} for u, t in SOURCES.items()]
+    # `used` says whether this source's text reached the writer, or was cut by
+    # SOURCE_TEXT_TOTAL (2026-08-24). Absent the distinction, the episode cites
+    # everything the researcher opened as though the write-up rested on it. When
+    # no synthesis ran at all, nothing was written from anything, and every
+    # source is honestly marked unused.
+    used = set(STATE.get("synthesis_sources") or [])
+    sources = [{"url": u, "title": t, "used": u in used} for u, t in SOURCES.items()]
     if as_json:
         out = {
             "question": question, "answer": answer, "sources": sources,

@@ -106,6 +106,11 @@ USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) halo-prep/1.0"
 # the sub-question, since the child's answer only existed on its stdout at exit.
 RESEARCH_TIMEOUT = int(os.environ.get("DRP_RESEARCH_TIMEOUT", "10800"))
 RESULTS_DIR = os.environ.get("DRP_RESULTS_DIR", "/tmp")
+# Below this, a section is marked thin in the content handed to the episode
+# model, overriding the briefing's "cover every question in real depth". Not a
+# gate -- see build_podcast_content(). Yesterday's healthy sections ran
+# 2,693-4,542 chars; the one that prompted this was 366.
+THIN_SECTION_CHARS = int(os.environ.get("DRP_THIN_SECTION_CHARS", "1200"))
 # Optional gate on --source-document: a command that is run as `CMD <path>` and
 # must exit 0 for the run to proceed. Unset by default -- this script has no
 # opinion about where a document came from and no knowledge of any particular
@@ -455,10 +460,46 @@ def build_podcast_content(results, document=None):
         parts.append(f"# Source document: {document['title']}\n\n{document['text']}")
     for r in results:
         section = f"## {r['question']}\n\n{r['answer']}"
+        # A section can be honestly short: on a topic only months old there may
+        # be little that any source actually settles, and the writer is
+        # instructed to say so rather than fill the gap. One 2026-08-24
+        # sub-question synthesized to 366 characters from 24 sources that way.
+        # The danger is the global briefing, which tells the episode model to
+        # cover every question "in real depth" and name specifics -- aimed at a
+        # two-sentence section, that is an instruction to invent the depth.
+        # Deliberately NOT a length gate that drops the section: excluding an
+        # honest thin answer would hide a real finding and reward padding.
+        # Mark it instead, so the briefing's demand is overridden locally.
+        if len(r["answer"]) < THIN_SECTION_CHARS:
+            section += ("\n\n[Note to the narrators: research found little on this "
+                        "question and the summary above is all of it. Cover it briefly "
+                        "and move on. Do not expand it, do not add examples, names, "
+                        "dates or figures from your own knowledge, and do not treat "
+                        "its brevity as a gap to fill -- that the evidence is thin is "
+                        "itself the finding, and saying so is better than inventing "
+                        "the rest.]")
         srcs = [s for s in r.get("sources", []) if s.get("url")]
         if srcs:
-            listing = "\n".join(f"- {s['title'] or s['url']} ({s['url']})" for s in srcs)
-            section += f"\n\nSources consulted for this question:\n{listing}"
+            # Split by whether the source's text actually reached the writer.
+            # `used` is absent on results from an older openresearcher-run.py or
+            # a replayed results file, and then every source is listed as before
+            # rather than silently demoted to "read".
+            fmt = lambda s: f"- {s['title'] or s['url']} ({s['url']})"
+            if any("used" in s for s in srcs):
+                cited = [s for s in srcs if s.get("used")]
+                extra = [s for s in srcs if not s.get("used")]
+            else:
+                cited, extra = srcs, []
+            if cited:
+                section += ("\n\nSources consulted for this question:\n"
+                            + "\n".join(fmt(s) for s in cited))
+            if extra:
+                # 14 of 24 on one 2026-08-24 question. Listing those under
+                # "sources consulted" made the write-up look like it rested on
+                # material no sentence of it could have seen.
+                section += ("\n\nAlso read, but not part of the write-up above "
+                            "(do not attribute claims to these):\n"
+                            + "\n".join(fmt(s) for s in extra))
         parts.append(section)
     return "\n\n---\n\n".join(parts)
 
