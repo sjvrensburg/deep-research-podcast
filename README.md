@@ -753,6 +753,44 @@ happen is not a pass, and a gate that opens when it breaks is not a gate. Unset
 Every earlier attempt at this was a paragraph in a skill file telling an agent to
 check first, and each was followed by an agent that did not.
 
+## When the server rejects the model's own tool call
+
+2026-08-24, a real run. Three identical 500s, five seconds apart, and the
+sub-question died with them:
+
+```
+Failed to parse tool call arguments as JSON: [json.exception.parse_error.101]
+parse error at line 1, column 1098: syntax error while parsing object -
+unexpected end of input; expected '}'
+```
+
+That is llama.cpp refusing what the model had just emitted. `TURN_MAX_TOKENS` is
+1200, sized for "emit one tool call", and a model that writes a long enough query
+blob runs out of budget *inside the braces* — the JSON stops mid-object and the
+server will not accept it.
+
+Two things were wrong, and the second is the expensive one.
+
+**`chat()`'s retry loop is built for transient failures.** A 503 during a reload
+or a dropped socket is worth another attempt with the same request. This is not:
+the failure is a property of the request, so the second and third attempts
+reproduced it exactly. `chat()` now recognises this specific rejection and
+doubles `max_tokens` for the retry, capped at 8000, for that call only —
+`TURN_MAX_TOKENS` stays where it is, because it is also the per-turn reasoning
+budget that 120-turn runs are sized against.
+
+**A dead call took the whole sub-question with it.** The research loop called
+`chat()` bare, so an exhausted retry propagated out of `main()`, exited non-zero,
+and the pipeline discarded the sub-question — every source, every turn. It cost
+one at turn 4; at turn 90 it would have cost ninety turns and everything they
+found. But by then nothing is missing: `SOURCES`, `SOURCE_TEXT` and the
+trajectory are all in hand. The loop now stops researching and answers from what
+it has, exactly as a spent turn budget does. If nothing had been read yet, the
+grounding gate refuses and the pipeline drops the sub-question — the same outcome
+as before, minus the traceback.
+
+Fifth recurrence of "completed work must survive a later failure".
+
 ## Verified end to end
 
 Second run, after all of the above, same two sub-questions:

@@ -143,13 +143,17 @@ themselves — an assistant turn with `tool_calls` must be followed by one `tool
 per call. Unpruned, a 120-turn run needs ~207k tokens against a 131k window and cannot
 finish; worse, silent context-shift drops the system prompt and the run goes ungrounded.
 
-**Completed work must survive a later failure.** This class of bug has recurred four
+**Completed work must survive a later failure.** This class of bug has recurred five
 times. Concretely: `chat()` and `api()` both retry transient failures and 5xx/429 and
 fail fast on other 4xx; every Open Notebook `POST` is individually guarded, as is
 `build_notebook()` as a whole (the episode does not need the notebook); the research loop
 appends each result as it completes (never a list comprehension) and skips failed
 sub-questions; results are persisted to `RESULTS_DIR` *before* any Open Notebook call,
-and that write is itself guarded; tool dispatch functions return an error *string* as
+and that write is itself guarded; a `chat()` that finally fails inside the research loop
+ends the loop and answers from what was already read rather than raising (a real run lost
+a sub-question this way, and the same failure at turn 90 would have discarded 90 turns);
+`chat()` also escalates `max_tokens` when the server rejects the model's own tool call as
+truncated, since retrying that verbatim reproduces it; tool dispatch functions return an error *string* as
 tool output rather than raising, and the dispatch *call site* is guarded too (the
 arguments are model output). SIGTERM/SIGHUP raise `SystemExit` and the top-level
 handler catches `BaseException`, so `systemctl --user stop` on a detached run still

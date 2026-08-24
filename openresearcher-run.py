@@ -395,16 +395,47 @@ def _prune_history(messages):
     return out
 
 
+def _is_truncated_tool_call(err):
+    """Did the server reject the model's OWN tool call as unparseable?
+
+    2026-08-24, a real run: three identical 500s in a row, and the sub-question
+    died with them --
+
+        Failed to parse tool call arguments as JSON: [json.exception.parse_error
+        .101] parse error at line 1, column 1098: syntax error while parsing
+        object - unexpected end of input; expected '}'
+
+    That is llama.cpp refusing what the model just emitted: a tool call whose
+    JSON arguments stop mid-object, because generation hit max_tokens partway
+    through writing them. TURN_MAX_TOKENS is 1200, sized for "emit one tool
+    call", and a model that writes a long enough query blob runs out inside the
+    braces.
+
+    It matters because chat()'s retry loop is built for TRANSIENT failures -- a
+    503 during a reload, a dropped socket -- and this one is a property of the
+    request. Retrying it verbatim reproduces it exactly, which is what the run
+    above did three times before giving up and discarding 120 turns' worth of
+    budget for that question. Detect it so the retry can change something.
+    """
+    s = str(err).lower()
+    return ("500" in s and "tool call" in s
+            and ("parse error" in s or "unexpected end of input" in s))
+
+
 def chat(messages, use_tools=True, stop=None, temperature=0.6,
          max_tokens=TURN_MAX_TOKENS, retries=3, endpoint=None):
-    # `_elided` is bookkeeping for _prune_history(), not part of the API schema.
-    body = {"messages": [{k: v for k, v in m.items() if k != "_elided"} for m in messages],
-            "max_tokens": max_tokens, "temperature": temperature, "top_p": 0.95}
-    if use_tools:
-        body.update(tools=TOOLS, tool_choice="auto")
-    if stop:
-        body["stop"] = stop
-    data = json.dumps(body).encode()
+    def _encode(mt):
+        # `_elided` is bookkeeping for _prune_history(), not part of the API schema.
+        body = {"messages": [{k: v for k, v in m.items() if k != "_elided"}
+                             for m in messages],
+                "max_tokens": mt, "temperature": temperature, "top_p": 0.95}
+        if use_tools:
+            body.update(tools=TOOLS, tool_choice="auto")
+        if stop:
+            body["stop"] = stop
+        return json.dumps(body).encode()
+
+    data = _encode(max_tokens)
     endpoint = endpoint or LLM
     # Unguarded until 2026-08-22, and the only fatal network call in the repo:
     # every other one (_get, tool_search, deep-research-podcast.py's api())
@@ -428,8 +459,23 @@ def chat(messages, use_tools=True, stop=None, temperature=0.6,
         except Exception as e:
             last = e
         if attempt < retries - 1:
-            print(f"[chat] attempt {attempt + 1}/{retries} failed ({last!r}); retrying",
-                  file=sys.stderr)
+            # Change something before retrying a truncated tool call, or the
+            # next attempt reproduces it. Doubling the budget is the fix that
+            # matches the cause: the JSON stopped mid-object because generation
+            # ran out of tokens, not because the model was confused. Capped, and
+            # only for THIS call -- TURN_MAX_TOKENS stays where it is, because
+            # it is also the per-turn reasoning budget that 120-turn runs are
+            # sized against, and raising it globally to fix a rare long tool
+            # call would cost every turn.
+            if _is_truncated_tool_call(last):
+                max_tokens = min(max_tokens * 2, 8000)
+                data = _encode(max_tokens)
+                print(f"[chat] the server rejected the model's own tool call as "
+                      f"truncated; retrying with max_tokens={max_tokens}",
+                      file=sys.stderr)
+            else:
+                print(f"[chat] attempt {attempt + 1}/{retries} failed ({last!r}); retrying",
+                      file=sys.stderr)
             time.sleep(5 * (attempt + 1))
     raise RuntimeError(f"LLM call failed after {retries} attempts: {last!r}")
 
@@ -936,7 +982,28 @@ def main():
         # request never grows past what the server will accept. See
         # _prune_history() for why an unpruned 120-turn run could not finish.
         messages = _prune_history(messages)
-        choice = chat(messages)
+        # A dead LLM call must not take the research with it (2026-08-24).
+        # chat() already retries transient failures and escalates a truncated
+        # tool call, so reaching this handler means the call is genuinely not
+        # coming back -- and until now that raised straight out of main(), exited
+        # non-zero, and the pipeline discarded the WHOLE sub-question. A real run
+        # lost one that way at turn 4; the same failure at turn 90 would have
+        # thrown away 90 turns and every source with them.
+        #
+        # Everything needed to answer is already in hand: SOURCES, SOURCE_TEXT
+        # and the trajectory so far. So stop researching and answer from what
+        # was gathered, exactly as a spent turn budget does. If nothing was read
+        # yet, resolve_answer()'s grounding gate refuses and the pipeline drops
+        # the sub-question -- the same outcome as before, minus the traceback.
+        try:
+            choice = chat(messages)
+        except Exception as exc:
+            print(f"[main] research aborted at turn {turn} ({type(exc).__name__}: "
+                  f"{exc}); answering from the {len(SOURCES)} source(s) already read",
+                  file=sys.stderr)
+            _emit(question, resolve_answer(messages, question), turn, True,
+                  args.json, researched_as)
+            return
         msg = choice["message"]
         calls = msg.get("tool_calls") or []
         # reasoning_content, not content, on tool-calling turns -- llama.cpp's
