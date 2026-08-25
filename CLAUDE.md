@@ -53,8 +53,9 @@ and also if it is missing or hangs -- the gate fails closed on purpose).
 
 Local stack (verified 2026-08-22): SearXNG and Open Notebook run persistently;
 `llama-research.service` (OpenResearcher, port 8085, `--ctx-size 131072`) is on-demand
-via `systemctl --user start llama-research`; `llama-gemma26` on :8088 is the writer for both
-`DRP_ENRICH_LLM_URL` and `DRP_SYNTH_LLM_URL`. The box runs several resident llama-servers and is near its memory
+via `systemctl --user start llama-research`; `llama-ornith35` on :8088 is the writer for both
+`DRP_ENRICH_LLM_URL` and `DRP_SYNTH_LLM_URL` (it replaced `llama-gemma26` on that port on
+2026-08-25 — the port was kept across the swap, so neither env var changed). The box runs several resident llama-servers and is near its memory
 ceiling — starting `llama-research` alongside them has been OOM-killed, so free memory
 before a long run.
 
@@ -79,7 +80,9 @@ question). Anything else printed must go to stderr, or `run_research()` breaks.
 
 `SOURCES` (module-global, insertion-ordered `url -> title`) is populated only by
 `tool_open()` — deliberately not by search hits — so "sources" means pages actually read.
-This is the metric the README's Gemma-vs-OpenResearcher comparison turns on.
+This is the metric the README's Gemma-vs-OpenResearcher comparison turns on. (That comparison
+is a 2026-08-22 measurement and stays attributed to Gemma; :8088 has served
+Ornith-1.5-35B-A3B since 2026-08-25 and the comparison has not been re-run against it.)
 
 **The single most important property of the whole repo: an ungrounded but fluent answer
 must never pass silently as research.** Several guards exist for exactly this, each added

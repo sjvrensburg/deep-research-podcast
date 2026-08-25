@@ -409,8 +409,8 @@ def build_podcast_content(results, document=None):
     # full-text source for browsing/citation in the Open Notebook UI, but
     # those raw sources -- academic PDFs, often hundreds of embedding chunks
     # each -- are what blew a real run's context: 26 sources (4 synthesized
-    # answers + 22 raw citations) totalled 780,063 tokens against the Mentor's
-    # 131,072 window. The synthesized answers themselves are small (measured
+    # answers + 22 raw citations) totalled 780,063 tokens against the :8088
+    # writer's 131,072 window. The synthesized answers themselves are small (measured
     # 216-2114 chars each on that same run) -- they ARE the point of running
     # OpenResearcher at all, so generating from them directly is both far
     # smaller and more faithful to "the research", not a lossy workaround.

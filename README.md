@@ -212,9 +212,15 @@ it. It is a one-line change and it is the right instinct — the pipeline is
 deliberately model-agnostic, so it deserved a real test rather than an appeal
 to the model card.
 
-Tested 2026-08-22 against **Gemma-4-26B-A4B**, a capable resident 26B-A4B
-instruct model, on identical terms: same question, same harness, same SearXNG,
-same `--max-turns 10`.
+Tested 2026-08-22 against **Gemma-4-26B-A4B**, at the time the resident 26B-A4B
+instruct model on `:8088`, on identical terms: same question, same harness, same
+SearXNG, same `--max-turns 10`.
+
+Everything below is that 2026-08-22 measurement and is left attributed to Gemma.
+**`:8088` has served Ornith-1.5-35B-A3B since 2026-08-25** and this comparison has
+**not** been re-run against it — so treat the Gemma column as evidence about
+general instruct models driving a research loop, which is the point it was making,
+and not as a live description of what is on that port today.
 
 | | Gemma-4-26B-A4B | OpenResearcher-30B-A3B |
 |---|---|---|

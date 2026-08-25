@@ -272,7 +272,8 @@ The two `--setenv` LLM lines are **not optional in practice** (2026-08-22).
 Without them, enrichment and the final write-up both run on OpenResearcher,
 which cannot do either — the run will research well and then produce no prose,
 and the grounding gate will drop those sub-questions or refuse the episode
-outright. `:8088` is `llama-gemma26`; any resident instruct endpoint works.
+outright. `:8088` is `llama-ornith35` (it was `llama-gemma26` until 2026-08-25 — the port was kept
+across that swap on purpose); any resident instruct endpoint works.
 
 The `--source-document` line is only present if step 2 applies (an attachment
 was converted). Omit it entirely for a from-scratch topic — do not pass an
@@ -338,7 +339,7 @@ the full story.
 `deep-research-podcast.py` (this repo):
 
 1. Starts `llama-research` (`:8085`, on-demand — this repo's convention is
-   disabled-by-default for anything outside the always-on Executor/Mentor/embedding
+   disabled-by-default for anything outside the always-on :8088 worker/embedding
    tier) and SearXNG if either isn't already up, waits for both to become healthy.
 2. Runs `scripts/openresearcher-run.py --json --max-turns N` once per sub-question
    — each call first turns the (possibly casually-phrased) sub-question into extra
@@ -350,7 +351,7 @@ the full story.
    **Two of the three LLM roles are not the research model** (2026-08-22).
    OpenResearcher researches; a general instruct model writes. Set
    `DRP_ENRICH_LLM_URL` and `DRP_SYNTH_LLM_URL` to a resident instruct endpoint
-   (on this box, `llama-gemma26` at `:8088`); both fall back to the research
+   (on this box, `llama-ornith35` at `:8088`); both fall back to the research
    endpoint, which *works* but badly. Measured that day: asked to rewrite a
    question, OpenResearcher answered it instead — and the researcher, handed a
    question containing its own answer, stopped at turn 0 having read nothing.

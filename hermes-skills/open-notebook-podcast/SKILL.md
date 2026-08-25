@@ -263,18 +263,27 @@ Don't write a bespoke poll loop inline — use the bundled script. It already ha
 and failure notification paths correctly (getting the `/api` prefix on the base URL wrong is an
 easy, silent mistake — the script has it right).
 
-**Outline/transcript generation runs on `gemma4-26b-a4b` (`:8088`) as of 2026-08-16 — this IS now
-the Mentor, not a workaround.** History, in order: KAT-Coder (contended with live chat, same
+**Outline/transcript generation runs on `ornith-1.5-35b-a3b` (`:8088`) as of 2026-08-25.**
+It replaced `gemma4-26b-a4b` on that port, which had held it since 2026-08-16. The port has
+never moved; only the model on it has, and each swap kept the port precisely so this skill and
+the rest of the pipeline did not have to change. History, in order: KAT-Coder (contended with live chat, same
 single `--parallel 1` slot this conversation answers from) → `nemotron-mentor` (`:8082`, reverted
 same day — Open Notebook's request/cancel pattern reliably triggered Mentor's MTP
 speculative-decoding hang, `03-pitfalls.md` #18; 3/3 consecutive attempts failed with `503:
 Loading model` as `llama-watchdog` restarted it mid-job) → `agents-a1-4b` (`:8083`, no drafter, so
 immune, but a 4B subagent model doing mentor-class work) → **`gemma4-26b-a4b`, promoted to full
 Mentor on 2026-08-16 after Nemotron proved too flaky for ongoing use generally, not just against
-Open Notebook.** No drafter, so still immune to the hang class, and now genuinely the box's
-best-available long-form-writing model rather than a stopgap. `nemotron-mentor` (`:8082`) is
-retired outright — `llama-mentor.service` and its watchdog are stopped and disabled, not just
-avoided for this one workflow.
+Open Notebook.** No drafter, so still immune to the hang class, and genuinely the box's
+best-available long-form-writing model at the time rather than a stopgap. `nemotron-mentor`
+(`:8082`) is retired outright — `llama-mentor.service` and its watchdog are stopped and disabled,
+not just avoided for this one workflow — → **`ornith-1.5-35b-a3b`, 2026-08-25**, adopted on
+throughput (1.36x prefill / 1.56x decode at d131072), context headroom and tool-call correctness.
+Also no drafter, so the hang class stays closed. **Note the "Mentor" framing above is dead
+language**: that role was retired 2026-08-22 and `:8088` is now simply Open Notebook's worker,
+shared with the deep-research pipeline and anti-watermark-mcp. **Prose quality was NOT measured
+in that swap** — see halo-prep `docs/00-backlog.md`; if outlines or transcripts read worse than
+they did before 2026-08-25, that is the first thing to suspect and the Gemma weights are kept so
+you can A/B it.
 
 **If Nemotron is ever revived for anything**, the hang is load-bearing evidence against using it
 near Open Notebook's request/cancel pattern specifically — that needs a real upstream fix before
@@ -284,8 +293,8 @@ it's safe here again, independent of whatever else it might get used for.
 `solo_expert_vibevoice`/`tech_experts_vibevoice` speaker profiles, opt-in, not the default.** Both
 sound much more natural (operator-confirmed) but the pipeline has a real, understood rough edge:
 Open Notebook fires 5 TTS requests concurrently per batch, VibeVoice's server processes one at a
-time (`VIBEVOICE_MAX_CONCURRENCY=1`, deliberate — avoids GPU contention with `llama-kat`/
-`llama-gemma26`), so some requests time out client-side and need a retry. `podcast-creator`'s own
+time (`VIBEVOICE_MAX_CONCURRENCY=1`, deliberate — avoids GPU contention with the resident
+llama servers), so some requests time out client-side and need a retry. `podcast-creator`'s own
 retry logic recovers reliably, but generation takes noticeably longer than the Kokoro path. Use
 the `_vibevoice` profile variants only when the user has asked for higher voice quality and can
 tolerate a longer wait; otherwise default to the Kokoro-backed profiles below, which are faster
@@ -296,7 +305,8 @@ and equally reliable.
 - **`Could not parse response content as the length limit was reached` is an OUTPUT-token cap,
   not a context-window problem and not a wrong-model problem.** `podcast_creator/nodes.py`
   hardcodes `max_tokens: 3000` for the outline call and `5000` for the transcript call unless the
-  episode profile overrides them. Gemma spends part of that budget on `reasoning_content`, so on a
+  episode profile overrides them. The `:8088` model spends part of that budget on
+  `reasoning_content` — true of Gemma and of Ornith alike — so on a
   large notebook the structured-output JSON gets truncated mid-object and the parser fails — the
   reported `prompt_tokens` (~67K) is well inside `:8088`'s 131072 context and is a red herring.
   Fixed on this box 2026-08-17 by setting `max_tokens: 12000` on every episode profile (`PUT
@@ -306,7 +316,8 @@ and equally reliable.
 - `notebooks` in that call must be a JSON array (`["notebook:xxx"]`), not a bare string, even
   though the OpenAPI schema's type declaration says string.
 - Bundled episode profiles ship with `outline_llm`/`transcript_llm` unset by default on a fresh
-  Open Notebook install — already fixed on this box (both point at `gemma4-26b-a4b`, see above),
+  Open Notebook install — already fixed on this box (both point at the `:8088` model by ID, so
+  the 2026-08-25 swap did not disturb them; see above),
   but if you ever create a **new** custom episode profile, set both explicitly (`PUT
   /api/episode-profiles/{id}`) or generation fails immediately with "no outline model
   configured." Same for a new speaker profile's `voice_id` fields — Kokoro's catalog (`curl
