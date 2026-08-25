@@ -272,8 +272,9 @@ The two `--setenv` LLM lines are **not optional in practice** (2026-08-22).
 Without them, enrichment and the final write-up both run on OpenResearcher,
 which cannot do either — the run will research well and then produce no prose,
 and the grounding gate will drop those sub-questions or refuse the episode
-outright. `:8088` is `llama-ornith35` (it was `llama-gemma26` until 2026-08-25 — the port was kept
-across that swap on purpose); any resident instruct endpoint works.
+outright. `:8088` is whichever instruct server you have resident — any of them works. Pin the
+port rather than the model: the reference box has changed the model behind that port twice
+without the pipeline noticing, which is the point of writing the URL and not a model name.
 
 The `--source-document` line is only present if step 2 applies (an attachment
 was converted). Omit it entirely for a from-scratch topic — do not pass an
@@ -301,8 +302,19 @@ turn doesn't have to hold open.
 
 ### Progress monitoring
 
-Check on it with `systemctl --user list-units 'deep-research-podcast-*'` and
-`journalctl --user -u <unit> -f` every 5–10 min during active research turns, or honor a
+**Do not judge phase from `systemctl --user is-active` or from a `list-units` glob** — the two
+obvious checks are both wrong here, and quietly:
+
+- The pipeline runs as a *transient* `systemd-run` unit whose child deliberately outlives the
+  unit's active state, so a job that is actively researching reports **inactive**.
+- Each run gets a unique numeric invocation suffix, so a `'deep-research-podcast-*'` glob mixes
+  in other past episodes and corrupts any tally you take from it. Pin to this run's unit id.
+
+Read the journal instead — its event lines accumulate on disk and do not flicker the way a
+process check does. `references/progress-monitoring.md` has the markers, the counting commands
+and a working periodic-status script.
+
+Then `journalctl --user -u <unit> -f` every 5–10 min during active research turns, or honor a
 user-specified cadence (e.g. "check every 20 minutes").
 Also tail the log file — `--detach` prints its path on launch, and it is
 `$DRP_RESULTS_DIR/<unit>.log` (`/tmp/deep-research-podcast-<ts>.log` by default,
@@ -339,7 +351,7 @@ the full story.
 `deep-research-podcast.py` (this repo):
 
 1. Starts `llama-research` (`:8085`, on-demand — this repo's convention is
-   disabled-by-default for anything outside the always-on :8088 worker/embedding
+   disabled-by-default for anything outside your always-on writer/embedding endpoints
    tier) and SearXNG if either isn't already up, waits for both to become healthy.
 2. Runs `scripts/openresearcher-run.py --json --max-turns N` once per sub-question
    — each call first turns the (possibly casually-phrased) sub-question into extra
@@ -351,7 +363,7 @@ the full story.
    **Two of the three LLM roles are not the research model** (2026-08-22).
    OpenResearcher researches; a general instruct model writes. Set
    `DRP_ENRICH_LLM_URL` and `DRP_SYNTH_LLM_URL` to a resident instruct endpoint
-   (on this box, `llama-ornith35` at `:8088`); both fall back to the research
+   (on the reference box, an instruct server at `:8088`); both fall back to the research
    endpoint, which *works* but badly. Measured that day: asked to rewrite a
    question, OpenResearcher answered it instead — and the researcher, handed a
    question containing its own answer, stopped at turn 0 having read nothing.

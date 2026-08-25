@@ -263,27 +263,30 @@ Don't write a bespoke poll loop inline — use the bundled script. It already ha
 and failure notification paths correctly (getting the `/api` prefix on the base URL wrong is an
 easy, silent mistake — the script has it right).
 
-**Outline/transcript generation runs on `ornith-1.5-35b-a3b` (`:8088`) as of 2026-08-25.**
-It replaced `gemma4-26b-a4b` on that port, which had held it since 2026-08-16. The port has
-never moved; only the model on it has, and each swap kept the port precisely so this skill and
-the rest of the pipeline did not have to change. History, in order: KAT-Coder (contended with live chat, same
-single `--parallel 1` slot this conversation answers from) → `nemotron-mentor` (`:8082`, reverted
-same day — Open Notebook's request/cancel pattern reliably triggered Mentor's MTP
-speculative-decoding hang, `03-pitfalls.md` #18; 3/3 consecutive attempts failed with `503:
-Loading model` as `llama-watchdog` restarted it mid-job) → `agents-a1-4b` (`:8083`, no drafter, so
-immune, but a 4B subagent model doing mentor-class work) → **`gemma4-26b-a4b`, promoted to full
-Mentor on 2026-08-16 after Nemotron proved too flaky for ongoing use generally, not just against
-Open Notebook.** No drafter, so still immune to the hang class, and genuinely the box's
-best-available long-form-writing model at the time rather than a stopgap. `nemotron-mentor`
-(`:8082`) is retired outright — `llama-mentor.service` and its watchdog are stopped and disabled,
-not just avoided for this one workflow — → **`ornith-1.5-35b-a3b`, 2026-08-25**, adopted on
-throughput (1.36x prefill / 1.56x decode at d131072), context headroom and tool-call correctness.
-Also no drafter, so the hang class stays closed. **Note the "Mentor" framing above is dead
-language**: that role was retired 2026-08-22 and `:8088` is now simply Open Notebook's worker,
-shared with the deep-research pipeline and anti-watermark-mcp. **Prose quality was NOT measured
-in that swap** — see halo-prep `docs/00-backlog.md`; if outlines or transcripts read worse than
-they did before 2026-08-25, that is the first thing to suspect and the Gemma weights are kept so
-you can A/B it.
+**Point outline/transcript generation at a dedicated writer endpoint, not at the model your
+chat turns come from.** Set `outline_llm` and `transcript_llm` by model ID in your episode
+profiles; then the model behind that endpoint can be swapped without touching this skill, the
+profiles, or the pipeline. On the reference box that endpoint is an instruct server on `:8088`
+whose model has changed four times while the port never has — which is the whole reason this
+file names a port and not a model.
+
+Those four steps are worth knowing because each was a distinct failure mode you may hit too:
+
+1. **The chat model itself.** Contends with live conversation — same single `--parallel 1` slot
+   your chat turn is answered from, so an episode blocks the user for its whole runtime.
+2. **A model with an MTP speculative-decoding drafter.** Open Notebook's request/cancel pattern
+   reliably triggered a hang; 3/3 consecutive attempts failed with `503: Loading model` as a
+   watchdog restarted it mid-job. If your writer has a drafter, test cancel-then-reuse before
+   trusting it — see the `halo-prep` reference setup's `docs/03-pitfalls.md` #18.
+3. **A small subagent-class model.** No drafter, so immune to the hang, but underpowered for
+   long-form writing.
+4. **A mid-size instruct model with no drafter.** What the reference box settled on, and has
+   re-settled on twice since with different weights.
+
+**Two things to carry over rather than the model names.** A writer swap is cheap *only* if your
+profiles reference the model by ID — a name-based reference breaks on every swap. And a swap
+chosen on throughput and tool-call behaviour says nothing about **prose quality**, which is most
+of what this endpoint does; keep the previous weights until you have compared real episodes.
 
 **If Nemotron is ever revived for anything**, the hang is load-bearing evidence against using it
 near Open Notebook's request/cancel pattern specifically — that needs a real upstream fix before
