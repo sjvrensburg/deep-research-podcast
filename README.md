@@ -866,6 +866,42 @@ writer. And the writer can still attach wrong metadata to a real source: one
 paper is labelled 2026 while its arXiv ID indicates September 2025. "No
 fabricated citations" is not the same as "every stated fact is correct."
 
+## The progress signal that was never emitted
+
+Adding a web front end (`../drp-web`) meant asking a question nobody had needed a
+precise answer to before: *while a sub-question is being researched, how do you know
+it is still moving?*
+
+The answer turned out to be "you don't". `openresearcher-run.py` prints a line per
+turn — `[turn 37] browser.open({"url": ...})` — and it was guarded by
+`if not args.json`. The pipeline always passes `--json`. So in every run that went
+through `deep-research-podcast.py`, the line was never printed at all. And even
+without that guard it would not have escaped: `run_research()` used
+`capture_output=True`, so the child's stderr sat in a pipe until the sub-question
+ended, 15–40 minutes later, at which point a filtered handful of `[force_answer]` /
+`[synthesize]` lines were echoed and the rest discarded.
+
+Between them, those two lines of code meant a healthy run and a wedged one were
+indistinguishable for the entire duration of every sub-question. The
+progress-monitoring notes in `hermes-skills/` — journal markers, tallies of
+`researching:` lines, a cron watchdog every 30 minutes — are a careful workaround
+for an absence that was a one-line guard.
+
+Both are fixed. The turn line prints in `--json` mode too (stderr is this script's
+diagnostics channel by contract; the JSON object goes on the last line of *stdout*,
+so nothing that reads the interface can see it), and `run_research()` redirects the
+child's stderr to a file in `DRP_RESULTS_DIR` instead of a pipe:
+
+```
+[13:02:11] researching: 'What changed in X since 2025?' (max 120 turns)
+[13:02:11]   research log: /path/to/results/research-1788024417-179832.log
+```
+
+That file is readable while it fills, and it keeps the researcher's full diagnostics
+afterwards rather than the filtered subset. `stdout` was not touched. If the
+directory is unwritable the run falls back to the old captured pipe and says so —
+the live view is worth a fallback, never a failed run.
+
 ## License
 
 MIT — see `LICENSE`.

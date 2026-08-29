@@ -35,6 +35,33 @@ journalctl --user -u 'deep-research-podcast-<INVOCATION_ID>.service' --no-pager 
     | grep -E 'researching:|skipping this sub-question' | tail -n1
 ```
 
+## Per-turn progress (2026-08-29 and later)
+
+Everything above reads *journal markers*, which change once per sub-question -- so a
+healthy sub-question is 15-40 minutes of no new information. That was not a limit of the
+technique; it was a limit of the pipeline. Two things changed on 2026-08-29:
+
+- `openresearcher-run.py` now prints its `[turn N] tool(args)` line in `--json` mode as
+  well. It used to be guarded by `if not args.json`, and the pipeline always passes
+  `--json`, so the line was never emitted in a real run at all.
+- `run_research()` writes the researcher's stderr to a FILE instead of capturing it, and
+  logs the path:
+
+```
+[13:02:11] researching: 'What changed in X since 2025?' (max 120 turns)
+[13:02:11]   research log: $DRP_RESULTS_DIR/research-1788024417-179832.log
+```
+
+So the live check for "is this sub-question moving" is now a `tail`, not a tally:
+
+```bash
+tail -f "$(grep -oP 'research log: \K\S+' /path/to/run.log | tail -1)"
+```
+
+The journal-marker recipe below is still correct and is still what a cron watchdog should
+use -- it answers "how many questions are done and how many were dropped", which the turn
+lines do not. Use both: markers for phase, the research log for liveness.
+
 ## Durable cron watchdog (the 30-min cadence)
 
 A separate `--no-agent` hermes cron job runs a monitor script every tick and delivers its

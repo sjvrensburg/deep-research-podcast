@@ -1079,8 +1079,16 @@ def main():
                 args_ = json.loads(c["function"]["arguments"] or "{}")
             except json.JSONDecodeError:
                 args_ = {}
-            if not args.json:
-                print(f"[turn {turn}] {fn}({json.dumps(args_)[:90]})", file=sys.stderr)
+            # Printed in --json mode too, since 2026-08-29. It used to be guarded by
+            # `if not args.json`, which meant the turn line existed only in
+            # interactive use -- and the pipeline ALWAYS passes --json. So the one
+            # signal that a 15-40 minute sub-question is still moving was, in every
+            # run that mattered, never emitted at all: the progress-monitoring notes
+            # in hermes-skills, and drp-web's status page, both work around an
+            # absence that was a one-line guard. stderr is this script's diagnostics
+            # channel by contract (the JSON object goes on the last line of STDOUT),
+            # so nothing that reads the interface can see this line.
+            print(f"[turn {turn}] {fn}({json.dumps(args_)[:90]})", file=sys.stderr)
             # Guarded 2026-08-23. Tool dispatch returns an error STRING as tool
             # output rather than raising -- the invariant every dispatch function
             # already honours internally (tool_search's "Search failed: ...").

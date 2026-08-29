@@ -311,15 +311,46 @@ def release_research_backend():
 
 def run_research(question, max_turns):
     log(f"researching: {question!r} (max {max_turns} turns)")
-    proc = subprocess.run(
-        [sys.executable, OPENRESEARCHER, "--json", "--max-turns", str(max_turns), question],
-        capture_output=True, text=True, timeout=RESEARCH_TIMEOUT)
+    # The child's stderr goes to a FILE, not a pipe (2026-08-29). It used to be
+    # captured, which meant its per-turn lines -- `[turn 37] browser.open(...)`, the
+    # only evidence a sub-question is still moving -- did not exist anywhere until the
+    # sub-question ENDED, 15-40 minutes later. A healthy run and a wedged one looked
+    # identical for that whole time, in the journal and to anything watching it; the
+    # progress-monitoring notes in hermes-skills work around exactly this absence, and
+    # a web front end cannot work around it at all. Writing them out as they happen
+    # also means the full diagnostics survive the run instead of the filtered handful
+    # echoed below. stdout is deliberately untouched: it is the JSON interface between
+    # the two scripts, and one stray line on it breaks the pipeline.
+    stderr_path = os.path.join(RESULTS_DIR, f"research-{int(time.time())}-{os.getpid()}.log")
+    stderr_file = None
+    try:
+        stderr_file = open(stderr_path, "w")
+        log(f"  research log: {stderr_path}")
+    except OSError as e:
+        # An unwritable results directory must cost the live view, never the research.
+        log(f"  warning: could not open {stderr_path} ({e}); capturing the researcher's "
+            f"output in memory instead")
+    try:
+        proc = subprocess.run(
+            [sys.executable, OPENRESEARCHER, "--json", "--max-turns", str(max_turns), question],
+            stdout=subprocess.PIPE, stderr=(stderr_file or subprocess.PIPE),
+            text=True, timeout=RESEARCH_TIMEOUT)
+    finally:
+        if stderr_file is not None:
+            stderr_file.close()
+    stderr_text = proc.stderr
+    if stderr_text is None:
+        try:
+            with open(stderr_path, errors="replace") as f:
+                stderr_text = f.read()
+        except OSError:
+            stderr_text = ""
     if proc.returncode != 0:
-        raise RuntimeError(f"openresearcher-run.py failed for {question!r}: {proc.stderr[-2000:]}")
+        raise RuntimeError(f"openresearcher-run.py failed for {question!r}: {stderr_text[-2000:]}")
     out = proc.stdout.strip()
     if not out:
         raise RuntimeError(f"openresearcher-run.py produced no output for {question!r}: "
-                           f"{proc.stderr[-2000:]}")
+                           f"{stderr_text[-2000:]}")
     result = json.loads(out.splitlines()[-1])
     log(f"  -> {len(result['sources'])} sources, "
         f"{'forced' if result['budget_spent'] else 'natural'} conclusion "
@@ -330,7 +361,7 @@ def run_research(question, max_turns):
     # no synthesized answer said nothing about why -- the [force_answer] /
     # [synthesize] / [enrich] lines explaining it were captured and dropped. That
     # cost a full 35-minute two-question run to rediagnose by hand.
-    for line in (proc.stderr or "").splitlines():
+    for line in (stderr_text or "").splitlines():
         if line.startswith(("[force_answer]", "[synthesize]", "[enrich]", "[answer]",
                             "[chat]", "[tool]")):
             log(f"     {line}")

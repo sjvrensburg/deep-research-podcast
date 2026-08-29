@@ -51,6 +51,11 @@ rails, all with working defaults: `DRP_KEEP_TOOL_RESULTS`, `DRP_ANSWER_MAX_TOKEN
 (run as `CMD <path>` against `--source-document`; the run aborts unless it exits 0,
 and also if it is missing or hangs -- the gate fails closed on purpose).
 
+A web front end lives in `../drp-web` (`:8095`, on the tailnet): it composes the same
+CLI, launches it as a transient systemd unit, and reads the log. It is a third caller
+of these scripts beside the Hermes skill and the shell, and it reimplements nothing --
+keep it that way.
+
 Local stack (verified 2026-08-22): SearXNG and Open Notebook run persistently;
 `llama-research.service` (OpenResearcher, port 8085, `--ctx-size 131072`) is on-demand
 via `systemctl --user start llama-research`; `llama-ornith35` on :8088 is the writer for both
@@ -151,6 +156,16 @@ it. Do not simplify these away:
   source; counting it produces a citation list for pages nothing read.
 - `cursor` on `browser.open` is a **page ordinal** (`_page_offset()`), because that is
   what the model emits. Values ≥ `PAGE_CHARS` are still honoured as byte offsets.
+
+**A long sub-question must be visibly alive.** `openresearcher-run.py` prints a
+`[turn N] tool(args)` line per turn on stderr -- in `--json` mode too, since
+2026-08-29, when it was found that the `if not args.json` guard meant the pipeline
+(which always passes `--json`) never saw one. `run_research()` writes the child's
+stderr to a FILE in `RESULTS_DIR` rather than capturing it, and logs the path, so the
+lines are readable while they happen instead of 15-40 minutes later; stdout is
+untouched, being the JSON interface. Anything watching a run -- the skill's journal
+recipe, `../drp-web`'s status page -- depends on this, and reverting either half makes
+a healthy run indistinguishable from a wedged one.
 
 **The conversation must stay inside the context window.** `_prune_history()` runs before
 every `chat()` call: system prompt and the last `KEEP_VERBATIM_TOOL_RESULTS` tool results
