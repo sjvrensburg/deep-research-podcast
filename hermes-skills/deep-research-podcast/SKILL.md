@@ -189,6 +189,20 @@ nothing else in the chain has that lifetime. On the origin box the poller does e
 acquiring a reference-counted lease on the TTS service and releasing it on every exit path, so
 concurrent jobs cannot tear the server out from under each other.
 
+**Check whether a run is already going before you launch one.** Since 2026-08-29 this
+pipeline has a second driver on the origin box: `../../../drp-web`, a browser front end on
+the tailnet (`http://drp-web/`) that composes the same CLI and launches it as a transient
+`drp-web-run-<id>.service`. It enforces one run at a time on its own side, but it cannot see
+a run you start from here, and a second research phase means two ~30B research models on a
+box that OOM-kills under one:
+
+```bash
+systemctl --user list-units --state=running 'drp-web-run-*' 'deep-research-podcast-*'
+```
+
+If something is listed, say so and wait rather than launching. Its status page shows the
+phase and which sub-question is running.
+
 ## 4. Launch the pipeline in the background — never block the turn
 
 **Simplest correct form: add `--detach` and call it however you like.** The

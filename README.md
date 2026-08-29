@@ -868,9 +868,10 @@ fabricated citations" is not the same as "every stated fact is correct."
 
 ## The progress signal that was never emitted
 
-Adding a web front end (`../drp-web`) meant asking a question nobody had needed a
-precise answer to before: *while a sub-question is being researched, how do you know
-it is still moving?*
+Adding a web front end (`../drp-web` — the same pipeline, driven from a browser over
+Tailscale instead of from an agent's shell) meant asking a question nobody had needed a
+precise answer to before: *while a sub-question is being researched, how do you know it
+is still moving?*
 
 The answer turned out to be "you don't". `openresearcher-run.py` prints a line per
 turn — `[turn 37] browser.open({"url": ...})` — and it was guarded by

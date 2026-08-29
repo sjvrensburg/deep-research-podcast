@@ -51,10 +51,13 @@ rails, all with working defaults: `DRP_KEEP_TOOL_RESULTS`, `DRP_ANSWER_MAX_TOKEN
 (run as `CMD <path>` against `--source-document`; the run aborts unless it exits 0,
 and also if it is missing or hangs -- the gate fails closed on purpose).
 
-A web front end lives in `../drp-web` (`:8095`, on the tailnet): it composes the same
-CLI, launches it as a transient systemd unit, and reads the log. It is a third caller
-of these scripts beside the Hermes skill and the shell, and it reimplements nothing --
-keep it that way.
+A web front end lives in `../drp-web` (`http://drp-web/` on the tailnet, `:8095` on the
+box): it composes the same CLI, launches it as a transient systemd unit, and reads the
+log. It is a third caller of these scripts beside the Hermes skill and the shell, and it
+reimplements nothing -- keep it that way. Two consequences for changes here: the log
+markers `run_research()` and `main()` print are that front end's only progress signal
+(see "A long sub-question must be visibly alive" below), and the JSON on the last line of
+`openresearcher-run.py --json`'s stdout now has three consumers rather than two.
 
 Local stack (verified 2026-08-22): SearXNG and Open Notebook run persistently;
 `llama-research.service` (OpenResearcher, port 8085, `--ctx-size 131072`) is on-demand
