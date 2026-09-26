@@ -13,6 +13,13 @@ conversation turn open for.
         --episode-name "..." --notebook-name "..." \
         "sub-question 1" "sub-question 2" ...
 
+If the research succeeded and the episode did not, regenerate the episode alone
+from the results file the run persisted (see stage (2) below), passing the same
+--source-document, if any, again:
+
+    python3 deep-research-podcast.py --episode-name "..." \
+        --from-results /tmp/drp-results-<ts>.json
+
 If you're driving this from an agent harness that kills backgrounded child
 processes on its own restart (the failure mode that motivated this in the first
 place -- see README.md), launch it as a detached unit instead of a shell
@@ -606,9 +613,10 @@ def verify_source_document(path):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("questions", nargs="+", help="one or more research sub-questions")
+    p.add_argument("questions", nargs="*",
+                    help="one or more research sub-questions (omit with --from-results)")
     p.add_argument("--episode-name", required=True)
-    p.add_argument("--notebook-name", required=True)
+    p.add_argument("--notebook-name", help="required unless --from-results")
     p.add_argument("--notebook-description", default="")
     p.add_argument("--briefing-suffix", default="",
                     help="passed to Open Notebook's podcast briefing -- what to focus on")
@@ -636,6 +644,12 @@ def main():
                          "documents itself.")
     p.add_argument("--source-document-title", default="",
                     help="defaults to the --source-document filename if unset")
+    p.add_argument("--from-results", metavar="DRP_RESULTS_JSON",
+                    help="skip research and the notebook: regenerate the episode from a "
+                         "drp-results-<ts>.json an earlier run persisted. For a run whose "
+                         "research succeeded and whose episode failed. Pass the same "
+                         "--source-document again if the original run had one; it is "
+                         "not in the results file.")
     p.add_argument("--detach", action="store_true",
                     help="re-launch this same invocation as a detached systemd user unit "
                          "and return immediately, printing the unit name and log path. "
@@ -645,6 +659,22 @@ def main():
                          "killed a run 60 seconds in). Every DRP_* variable in the "
                          "current environment is forwarded to the unit.")
     args = p.parse_args()
+    # --from-results added 2026-09-26. A run's research took 2h20m and
+    # succeeded, and then Open Notebook failed the episode on one malformed
+    # transcript segment. There was no way to regenerate from the persisted
+    # results, so the agent re-triggered generation by hand with notebook_id
+    # instead of content. That is the path trigger_podcast() exists to avoid,
+    # and Open Notebook, unable to read the notebook, substituted the literal
+    # "Notebook ID: <id>" as the whole content: an episode from nothing that
+    # would have sounded like research. Resuming belongs here, where the
+    # content is built the same way both times.
+    if args.from_results:
+        if args.questions:
+            p.error("--from-results takes no sub-questions: they are in the results file")
+    elif not args.questions:
+        p.error("give at least one sub-question, or --from-results")
+    elif not args.notebook_name:
+        p.error("--notebook-name is required unless --from-results")
     if args.detach and not os.environ.get("DRP_DETACHED"):
         # Self-backgrounding, added 2026-08-22. The skill documentation told the
         # calling agent three separate times to wrap this in `systemd-run`; it
@@ -691,6 +721,17 @@ def main():
             log("  warning: that's long enough to risk the same context-overflow failure "
                 "mode as Bug 2 below, depending on your model's context window -- consider "
                 "trimming to the sections you actually want narrated")
+
+    if args.from_results:
+        with open(args.from_results, encoding="utf-8") as f:
+            results = json.load(f)
+        if not isinstance(results, list) or not results:
+            raise RuntimeError(f"--from-results {args.from_results!r} holds no results")
+        log(f"resuming from {args.from_results} ({len(results)} sub-question results); "
+            "research and the notebook are skipped -- the original run's notebook "
+            "already exists")
+        generate_episode(args, results, document)
+        return
 
     results = []
     # ensure_research_backend() moved INSIDE the try 2026-08-22. It was the one
@@ -759,6 +800,11 @@ def main():
         # copy is strictly smaller than losing the deliverable.
         log(f"warning: could not build the notebook ({e}) -- continuing to episode "
             "generation, which does not depend on it")
+    generate_episode(args, results, document)
+
+
+def generate_episode(args, results, document):
+    """Content -> Open Notebook job -> poller. Shared by a full run and --from-results."""
     content = build_podcast_content(results, document=document)
     if args.fast:
         profile = args.fast_episode_profile or args.episode_profile
