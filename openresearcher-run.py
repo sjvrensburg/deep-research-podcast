@@ -63,7 +63,15 @@ KEEP_VERBATIM_TOOL_RESULTS = int(os.environ.get("DRP_KEEP_TOOL_RESULTS", "8"))
 # the run and was sharing the same 1200 with reasoning until 2026-08-22 -- see
 # the comment in chat().
 TURN_MAX_TOKENS = 1200
-ANSWER_MAX_TOKENS = int(os.environ.get("DRP_ANSWER_MAX_TOKENS", "4000"))
+# 4000 was itself the 2026-08-22 fix for the 1200 budget below being too tight
+# for a reasoning model's synthesis. It wasn't enough either: on a real
+# Ornith-1.5-35B-A3B (:8088) run 2026-09-01, 2 of 3 synthesis calls hit
+# finish_reason "length" at exactly 4000 generated tokens -- confirmed from
+# the :8088 systemd journal (n_gen == 4000 on the failures, 3651 on the one
+# that finished cleanly). Raised to 8000; if a reasoning writer still clips,
+# raise DRP_ANSWER_MAX_TOKENS rather than this default, since a general
+# instruct writer (no reasoning_content) may never need this much.
+ANSWER_MAX_TOKENS = int(os.environ.get("DRP_ANSWER_MAX_TOKENS", "8000"))
 # Enrichment needs its own budget for the same reason the answer does: measured
 # 2026-08-22, the rewrite call spent 6024 characters on reasoning and hit the
 # 1200-token cap with finish_reason "length" and empty content -- which is

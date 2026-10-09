@@ -119,7 +119,8 @@ beats voice quality.
 All optional, all with working defaults — listed because each one exists to
 prevent a specific failure documented at the bottom of this README:
 `DRP_KEEP_TOOL_RESULTS` (8) how many recent tool results stay verbatim in the
-research conversation, `DRP_ANSWER_MAX_TOKENS` (4000) the budget for the
+research conversation, `DRP_ANSWER_MAX_TOKENS` (8000, was 4000 until
+2026-09-01 — see below) the budget for the
 synthesized answer itself, `DRP_RESEARCH_TIMEOUT` (10800s) the ceiling on one
 sub-question's research subprocess, `DRP_POLLER_TIMEOUT` (14400s),
 `DRP_ENRICH_MAX_TOKENS` (4000), and `DRP_RESULTS_DIR` (`/tmp`) where raw
@@ -502,8 +503,20 @@ rather than producing an episode about nothing.
 1200 tokens shared with reasoning**, the budget sized for "emit one tool call",
 and `finish_reason` was never inspected, so an answer cut off mid-sentence was
 accepted as complete. Consistent with the 216–2114 characters per answer
-measured above. The answer call now gets `DRP_ANSWER_MAX_TOKENS` (default 4000)
-and flags truncation in-band rather than discarding real synthesis.
+measured above. The answer call now gets `DRP_ANSWER_MAX_TOKENS` (4000 at the
+time, raised to 8000 below) and flags truncation in-band rather than
+discarding real synthesis.
+
+**4000 was still not enough on a reasoning writer.** Measured 2026-09-01
+against Ornith-1.5-35B-A3B on `:8088`: 2 of 3 synthesis calls in a real run
+hit `finish_reason: "length"` at exactly 4000 generated tokens (confirmed
+from the server's own journal — `n_gen == 4000` on the failures, 3651 on the
+one that finished cleanly). The in-band truncation note added for the first
+version of this bug fired correctly, but a caller that doesn't check
+`finish_reason`/that note still ships a cut-off "synthesis". Default raised
+to 8000. This is a reasoning-model problem specifically — a general instruct
+writer with no `reasoning_content` may never need this much, so lower
+`DRP_ANSWER_MAX_TOKENS` if that's what's serving `DRP_SYNTH_LLM_URL`.
 
 **Any HTTP 200 counted as a source read.** No content-type check, no minimum
 length. An arXiv PDF — most of what this pipeline chases — was decoded as UTF-8
