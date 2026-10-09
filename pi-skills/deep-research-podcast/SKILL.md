@@ -41,6 +41,25 @@ without it. If conversion fails, stop and tell the user; never transcribe it you
 With a document, write sub-questions that add to it (reception, comparisons, later
 developments) rather than re-explain it; 2-3 is usually enough.
 
+### Academic papers as --source-document (feynman)
+
+feynman can *find* and *read* papers, but this pipeline gates every `--source-document`
+behind `marker_verify.sh` (launch.sh sets `DRP_DOC_VERIFY_CMD` unconditionally), which
+requires a `.marker-ok` sidecar with a matching sha256. feynman's `get --full-text` output is
+plain markdown with no sidecar, so it **fails verification** and the pipeline refuses to start —
+do not pass it as `--source-document`, and never fake a sidecar to get around the gate.
+
+Use feynman to fetch and read the paper, then convert the PDF through marker so it earns a
+provenance sidecar:
+```bash
+feynman alpha get --full-text <arxiv-id>   # read it to shape the briefing / sub-questions
+marker_run.sh <paper>.pdf                   # ocr-and-documents skill; produces the sidecar
+```
+then pass the verified markdown as `--source-document` with a `--source-document-title`. feynman's
+job here is fetching the PDF and letting you read it before launch; marker is what makes it a
+valid `--source-document`. Prefer this when the user wants the paper's full text grounded in the
+episode; otherwise let OpenResearcher research the sub-questions directly.
+
 ## 3. Launch
 
 ```bash
