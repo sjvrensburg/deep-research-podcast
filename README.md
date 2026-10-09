@@ -1,4 +1,7 @@
-# deep-research-podcast
+# local-podcast-studio
+
+Named `deep-research-podcast` until 2026-10-09; the pipeline script keeps that name. The repo
+now also carries the pi skills that drive it and single-notebook Open Notebook episodes.
 
 Point it at a topic. Walk away. Come back to a long, cited, multi-speaker podcast
 episode — grounded in real research an agent did on its own, not a model
@@ -18,7 +21,7 @@ Each sub-question gets its own 80–150-turn research agent (real web search,
 real page reads, real citations — not one shallow pass), and the synthesized
 answers become the podcast's source material. Before research starts, each
 sub-question is also rewritten into a more demanding research brief (see
-"Grounded, citable content by default" below) — real callers, whether a Hermes
+"Grounded, citable content by default" below) — real callers, whether an agent
 skill decomposing a casual chat message or a human typing a quick question,
 routinely hand this pipeline underspecified questions, and that's compensated
 for in the script rather than left as an instruction someone might skip.
@@ -145,7 +148,7 @@ minutes to a few hours for a multi-question deep dive — so run it under
 `systemd-run --user`, `tmux`, `nohup`, or whatever your environment prefers
 for a long background job. Set `DRP_POLLER_CMD` to a script that takes
 `job_id episode_name deliver_target` if you want a notification when the
-episode's ready; `hermes-skills/open-notebook-podcast/scripts/poll_and_notify.sh`
+episode's ready; `pi-skills/open-notebook-podcast/scripts/poll_and_notify.sh`
 is a working example (Signal delivery), included for reference rather than as
 a hard dependency.
 
@@ -177,10 +180,11 @@ python3 deep-research-podcast.py \
     "What has follow-up research found about watermark robustness against paraphrasing and other scrubbing attacks?"
 ```
 
-## `hermes-skills/`
+## `pi-skills/`
 
-Two [Hermes Agent](https://hermes-agent.nousresearch.com) skill definitions
-that wrap these scripts for an agentic assistant: deciding when a request
+Two [pi](https://github.com/earendil-works/pi) skills (until 2026-10-09, the
+[Hermes Agent](https://hermes-agent.nousresearch.com) skills in `hermes-skills/`,
+`git show 5d3ea31:hermes-skills/...`) that wrap these scripts for an agentic assistant: deciding when a request
 warrants this workflow versus a quicker one, decomposing a topic into
 sub-questions from conversation context, launching the pipeline as a detached
 unit so an agent-gateway restart can't kill a multi-hour job, and polling for

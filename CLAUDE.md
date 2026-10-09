@@ -15,9 +15,12 @@ read it before changing behaviour.
 - `deep-research-podcast.py` — the pipeline: spawns `openresearcher-run.py --json` once
   per sub-question via `subprocess`, then builds an Open Notebook notebook and triggers
   episode generation. Blocks for 30 min – several hours.
-- `hermes-skills/` — Hermes Agent skill definitions that wrap the pipeline. Reference
-  material for the operational concerns (detached launch, polling, no duplicate jobs),
-  not code the scripts import.
+- `pi-skills/` — the live [pi](https://github.com/earendil-works/pi) skills that drive this:
+  `deep-research-podcast` (its `launch.sh` wires the pipeline for the EVO-X3 and detaches it)
+  and `open-notebook-podcast` (single-notebook episodes, the poller, shortlist resolution).
+  Deployed by copy to `~/.pi/agent/skills/`; nothing syncs them, so `diff -r` after editing.
+  They moved here from halo-prep on 2026-10-09. The Hermes skills they replaced were in
+  `hermes-skills/` until then (`git show 5d3ea31:hermes-skills/...`).
 
 ## Running
 
@@ -53,7 +56,7 @@ and also if it is missing or hangs -- the gate fails closed on purpose).
 
 A web front end lives in `../drp-web` (`http://drp-web/` on the tailnet, `:8095` on the
 box): it composes the same CLI, launches it as a transient systemd unit, and reads the
-log. It is a third caller of these scripts beside the Hermes skill and the shell, and it
+log. It is a third caller of these scripts beside the pi skill and the shell, and it
 reimplements nothing -- keep it that way. Two consequences for changes here: the log
 markers `run_research()` and `main()` print are that front end's only progress signal
 (see "A long sub-question must be visibly alive" below), and the JSON on the last line of

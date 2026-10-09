@@ -1,28 +1,28 @@
 #!/usr/bin/env bash
-# STAGED v2 — replaces ~/.hermes/skills/research/open-notebook-podcast/scripts/poll_and_notify.sh
-#
-# Poll an Open Notebook podcast generation job to completion, then notify.
+# Poll an Open Notebook podcast generation job to completion, then notify on Signal.
+# Part of the pi `open-notebook-podcast` skill (local-podcast-studio pi-skills/, until 2026-10-09
+# halo-prep config/pi/skills/; deployed to
+# ~/.pi/agent/skills/). Ported from the Hermes skill of the same name on 2026-09-24,
+# when Hermes was removed (docs/13 Phase E); `git show 5aa8f04:config/hermes/skills/...`
+# has the original.
 #
 # Usage: poll_and_notify.sh <job_id> <episode_name> [deliver_target]
 #   job_id          e.g. command:dpyskjwt3gnbi0mpvrlw (from POST /api/podcasts/generate)
 #   episode_name    human-readable name, used in the notification text
-#   deliver_target  hermes send --to target (default: signal)
+#   deliver_target  accepted for compatibility with deep-research-podcast.py, which
+#                   passes it as $3; only "signal" exists now
 #
-# ── LAUNCH IT LIKE THIS ──────────────────────────────────────────────────
-#   systemd-run --user --unit="podcast-poller-$(date +%s)" \
+# ── LAUNCH IT LIKE THIS (make_podcast.py does) ───────────────────────────
+#   systemd-run --user --collect --unit="podcast-poller-$(date +%s)" \
 #     --setenv=PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" \
-#     /bin/bash ~/.hermes/skills/research/open-notebook-podcast/scripts/poll_and_notify.sh \
+#     /bin/bash ~/.pi/agent/skills/open-notebook-podcast/scripts/poll_and_notify.sh \
 #     "<job_id>" "<episode name>" signal
 #
-# NOT `nohup ... & disown`. A backgrounded child of the gateway dies with the
-# gateway: `systemctl --user restart hermes-gateway` on 2026-08-17 killed a
-# live poller mid-job (verified — the scope went with the service), orphaning a
-# running episode that would have completed into silence. A transient unit is
-# independent of the gateway and gives you `systemctl --user status` for free.
+# A transient unit, not a child of the agent: under Hermes a backgrounded child died
+# with `systemctl --user restart hermes-gateway` (2026-08-17, mid-job, the episode
+# completed into silence). pi-signal restarts the same way, so the rule carries over.
 #
-# `hermes send` does NOT need a running gateway for Signal/Telegram/Discord/SMS
-# (see hermes_cli/send_cmd.py — those are direct-send platforms), so this script
-# still delivers across a gateway restart *if* it is alive to do so.
+# Delivery is ~/.local/bin/signal-send, which needs no agent and no model.
 set -uo pipefail
 
 JOB_ID="${1:?usage: poll_and_notify.sh <job_id> <episode_name> [deliver_target]}"
@@ -31,7 +31,7 @@ DELIVER_TARGET="${3:-signal}"
 
 API="http://127.0.0.1:5055/api"
 PODCASTS_DIR="${HOME}/Music/open-notebook-podcasts"
-FAIL_LOG="${HOME}/.hermes/logs/podcast-notify-failures.log"
+FAIL_LOG="${HOME}/.local/state/pi-jobs/podcast-notify-failures.log"
 CONTAINER="${ON_CONTAINER:-open-notebook}"
 
 # Wall-clock budget rather than a poll count, so changing the interval schedule
@@ -49,34 +49,22 @@ PROGRESS_PINGS="${PROGRESS_PINGS:-0}"
 
 START_TS="$(date +%s)"
 
-# ── Single poller per job ────────────────────────────────────────────────
-# Without this, a retry loop in the agent that fires the launch twice gets you
-# two pollers, and the user gets duplicate "ready" messages AND duplicate audio
-# attachments. Today's agent looped 15 times on one tool call, so this is not
-# hypothetical.
-LOCK_FILE="/tmp/hermes-podcast-${JOB_ID//[^a-zA-Z0-9]/_}.lock"
-exec 9>"${LOCK_FILE}"
-if ! flock -n 9; then
-    echo "another poller already owns ${JOB_ID} (lock: ${LOCK_FILE}) — exiting" >&2
-    exit 0
-fi
-
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [poll] $*" >&2; }
 
 # ── Delivery, with the exit code actually checked ────────────────────────
-# The v1 script called `hermes send` and ignored its result. send_cmd.py
-# documents exit 1 = delivery failed at the platform level, so a failed send
-# exited 0 having told nobody — the audio existed and the user never heard.
+# The v1 script ignored its sender's result, so a failed send exited 0 having
+# told nobody — the audio existed and the user never heard.
 notify() {
-    local msg="$1" attempt rc
-    for attempt in 1 2 3; do
-        if hermes send --to "${DELIVER_TARGET}" "${msg}"; then
-            return 0
-        fi
-        rc=$?
-        log "hermes send failed (attempt ${attempt}/3, rc=${rc})"
-        sleep $((attempt * 10))
-    done
+    local msg="$1"
+    # signal-send exits non-zero on any failed delivery and retries transport errors
+    # itself, so no loop here. "MEDIA:<path>" is the old Hermes attachment syntax,
+    # kept as this script's internal convention; it becomes --attach.
+    if [[ "${msg}" == MEDIA:* ]]; then
+        signal-send --attach "${msg#MEDIA:}" "" && return 0
+    else
+        signal-send "${msg}" && return 0
+    fi
+    log "signal-send failed (rc=$?)"
     # Last resort: leave a breadcrumb so the work is recoverable by hand.
     mkdir -p "$(dirname "${FAIL_LOG}")"
     printf '%s\tjob=%s\ttarget=%s\tmsg=%s\n' \
@@ -84,6 +72,86 @@ notify() {
     log "UNDELIVERED — recorded in ${FAIL_LOG}"
     return 1
 }
+
+# ── A failed run has no job to poll ──────────────────────────────────────
+# The deep-research-podcast pipeline notifies on failure as well as success, and
+# it does so by handing this poller the literal job id "failed" (its notify()
+# says so outright: "a poller that cannot interpret it still fires and still
+# tells someone"). Until 2026-08-23 nothing here interpreted it, so a stopped or
+# crashed research run -- which never reached trigger_podcast() and therefore has
+# no job at all -- took the full new-job path: acquire the ~8 GiB vibevoice
+# lease, GET /api/podcasts/jobs/failed five times for five HTTP 500s over 40
+# seconds, then release. Three costs, all real, all observed twice within
+# fifteen minutes on 2026-08-23: an 8 GiB spike during a shutdown the operator
+# had usually triggered *because* memory was tight; ~45 s added to every stop
+# (the pipeline runs this synchronously); and a Signal message reading "I can't
+# read its job status ... Check: .../jobs/failed", which sends someone to a URL
+# that cannot ever work, about a job that never existed.
+#
+# Ahead of the lock as well as the lease: the lock key is derived from the job
+# id, so every failed run in the system shares one "podcast-poller-failed.lock"
+# and two overlapping failures would silence the second notification entirely.
+if [ "${JOB_ID}" = "failed" ]; then
+    log "run failed before a podcast job was created -- notifying, nothing to poll"
+    notify "⚠️ The deep research run for \"${EPISODE_NAME}\" failed before any podcast was generated. No episode is in progress and there is no audio to wait for. The reason is in the run log: journalctl --user -u 'deep-research-podcast-*' (or the log file the run printed at launch)."
+    exit 1
+fi
+
+# ── Single poller per job ────────────────────────────────────────────────
+# Without this, a retry loop in the agent that fires the launch twice gets you
+# two pollers, and the user gets duplicate "ready" messages AND duplicate audio
+# attachments. Today's agent looped 15 times on one tool call, so this is not
+# hypothetical.
+LOCK_FILE="/tmp/podcast-poller-${JOB_ID//[^a-zA-Z0-9]/_}.lock"
+exec 9>"${LOCK_FILE}"
+if ! flock -n 9; then
+    echo "another poller already owns ${JOB_ID} (lock: ${LOCK_FILE}) — exiting" >&2
+    exit 0
+fi
+
+# ── The TTS server's lease lives here ────────────────────────────────────
+# `vibevoice-api` is on-demand as of 2026-08-23 and every consumer starts it
+# AND tears it down (operator's instruction that day). This poller is where a
+# podcast job's teardown belongs: it is the only thing that outlives the agent
+# turn and knows when the episode is actually finished. The trap covers every
+# exit path — success, hard ceiling, the duplicate-poller bail-out above, and a
+# `systemctl --user stop` of this transient unit.
+#
+# Teardown goes through the lease helper, never a bare `systemctl stop`: a
+# voice message or a second episode can be synthesizing at the same moment, and
+# the refcount is what stops this from cutting their audio off mid-clip.
+# Passing $$ lets the helper prune this lease if the poller is killed outright.
+#
+# ── OFF BY DEFAULT SINCE 2026-09-24: podcasts are Kokoro now. ──
+# The operator moved podcasts from VibeVoice to Kokoro (preferred on listening;
+# ~2x faster; CPU-only and always on in the open-notebook compose stack, so no
+# lease and no GPU). Until then every episode took this lease, Kokoro ones
+# included, "a spurious ~8 GiB for the life of one episode" -- acceptable while
+# VibeVoice was the default, pure waste once it is not. VibeVoice stays for the
+# voice-message skill, which leases it itself.
+#
+# Set PODCAST_VIBEVOICE_LEASE=1 in the poller's environment to get the old
+# behaviour for a deliberate `_vibevoice`-profile run. Without it such a run
+# fails at synthesis, because Open Notebook will not start vibevoice-api -- the
+# same failure the lease was added to prevent, now opt-in rather than paid by
+# every Kokoro job.
+#
+# Overridable so this file stays usable on a box where halo-prep lives
+# elsewhere (or not at all): unset the path to something non-executable and
+# the poller just logs a warning and manages nothing.
+LEASE_HELPER="${VIBEVOICE_LEASE_HELPER:-${HOME}/Projects/halo-prep/scripts/vibevoice-lease.sh}"
+TTS_TAG="podcast-${JOB_ID//[^a-zA-Z0-9]/_}"
+release_tts() {
+    [ -x "${LEASE_HELPER}" ] && bash "${LEASE_HELPER}" release "${TTS_TAG}" || true
+}
+if [ "${PODCAST_VIBEVOICE_LEASE:-0}" != "1" ]; then
+    :   # Kokoro (the default): no TTS server to manage.
+elif [ -x "${LEASE_HELPER}" ]; then
+    bash "${LEASE_HELPER}" acquire "${TTS_TAG}" "$$" || log "could not acquire the TTS lease — continuing; generation may fail at synthesis"
+    trap release_tts EXIT
+else
+    log "WARNING: ${LEASE_HELPER} missing — not managing vibevoice-api for this job"
+fi
 
 # ── Job status, with the HTTP code kept ──────────────────────────────────
 # v1 did `.get("status","?")` on whatever came back and treated "?" as running.
@@ -227,9 +295,23 @@ while true; do
         exit 0
         ;;
     failed|error)
-        err="$(curl -s -m 10 "${API}/podcasts/jobs/${JOB_ID}" | python3 -c \
-            'import json,sys; print(json.load(sys.stdin).get("error_message","unknown error"))' 2>/dev/null || echo "unknown error")"
-        notify "Podcast \"${EPISODE_NAME}\" failed to generate: ${err}"
+        # Summarised, never pasted whole. error_message can carry the model's
+        # entire rejected output: 2026-09-26 a langchain "Invalid json output"
+        # was 10.8 KB of transcript JSON, and it arrived on Signal as what
+        # looked like the episode's script, not as a failure. The full text
+        # stays in the job record and in this unit's journal.
+        err="$(curl -s -m 10 "${API}/podcasts/jobs/${JOB_ID}" | python3 -c '
+import json, sys
+e = json.load(sys.stdin).get("error_message") or "unknown error"
+if e.startswith("Invalid json output") or "OUTPUT_PARSING_FAILURE" in e:
+    s = "the transcript model returned malformed JSON for a segment"
+else:
+    s = " ".join(e.split())
+    s = s if len(s) <= 300 else s[:300] + "..."
+print(f"{s} ({len(e)} chars in full)")
+print(e, file=sys.stderr)
+' || echo "unknown error")"
+        notify "Podcast \"${EPISODE_NAME}\" failed to generate: ${err}. Full error: curl -s ${API}/podcasts/jobs/${JOB_ID} | jq -r .error_message"
         exit 1
         ;;
     esac
@@ -267,8 +349,10 @@ while true; do
     fi
 
     # One up-front message with the real shape of the job. The podcast-workflow
-    # skill advertises 15-25 min, which is the Kokoro figure; VibeVoice has run
-    # 72.5 min here. Telling the user the segment count beats a wrong ETA.
+    # skill advertises 15-25 min; a 7-segment Kokoro episode took 39 min here
+    # and VibeVoice 72.5 (docs/07 §9.11). The range below spans both, and is
+    # sized for VibeVoice at the top end -- tighten it once Kokoro runs have
+    # been timed. Telling the user the segment count beats a wrong ETA.
     if [ "${announced_total}" -eq 0 ]; then
         total="$(segment_total)"
         if [ -n "${total}" ]; then
