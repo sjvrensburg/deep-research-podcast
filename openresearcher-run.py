@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Drive OpenResearcher-30B-A3B through its own agent loop, against local SearXNG.
 
-Extracted from a hardware runbook (github.com/sjvrensburg/halo-prep) where the model
-serves off a local llama-server and SearXNG runs alongside it; see that repo's
-docs/07-expansion.md §9.2/§9.10 for how those two pieces were stood up. This script
+Extracted from the author's private hardware runbook (halo-prep) where the model
+serves off a local llama-server and SearXNG runs alongside it; that repo's
+docs/07-expansion.md §9.2/§9.10 records how those two pieces were stood up. This script
 is the missing executor between them and has no other dependency on that box --
 point DRP_LLM_URL/DRP_SEARXNG_URL at any OpenAI-compatible chat endpoint and any
 SearXNG instance and it works the same way.

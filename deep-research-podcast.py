@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Research -> Open Notebook -> long podcast, chained and unattended.
 
-Extracted from a hardware runbook (github.com/sjvrensburg/halo-prep) where this
-ran against a local llama-server + SearXNG + Open Notebook stack; see that repo's
-docs/07-expansion.md §9.13 for the full origin story, including three real bugs
+Extracted from the author's private hardware runbook (halo-prep) where this ran
+against a local llama-server + SearXNG + Open Notebook stack; that repo's
+docs/07-expansion.md §9.13 has the full origin story, including three real bugs
 found running it at production scale. Run this in the BACKGROUND -- it blocks for
 as long as research plus podcast generation take, which for a multi-question deep
 dive is realistically 30 minutes to a few hours, not something to hold a

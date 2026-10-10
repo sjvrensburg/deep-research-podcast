@@ -2,6 +2,8 @@
 
 Named `deep-research-podcast` until 2026-10-09; the pipeline script keeps that name. The repo
 now also carries the pi skills that drive it and single-notebook Open Notebook episodes.
+References to halo-prep in comments and skills are to the author's private runbook for the box
+this runs on; they are provenance, not links.
 
 Point it at a topic. Walk away. Come back to a long, cited, multi-speaker podcast
 episode — grounded in real research an agent did on its own, not a model
