@@ -52,7 +52,15 @@ minutes of GPU are spent.
   sounded right and the notes were absent. The script refuses a PDF as `--doc` for this reason.
 
 Only pass URLs you have checked resolve to real content (a quick `curl -sL <url> | head`).
-Pages that extract to nothing are dropped by the script and listed in its output.
+Pages that extract to nothing, or to under 500 characters (a block page), are dropped by the
+script and listed in its output.
+
+**Size matters as much as relevance.** Every source's full text goes into every outline and
+transcript call, and the model's window is 131,072 tokens. The script refuses to generate when
+the sources leave less than 32K of it, and lists them by size. Prefer focused pages (a repo
+README, an article, a spec page) over whole forum threads: on 2026-10-10 two Hacker News threads
+that never mentioned the topic were 108K of 128K tokens, and the outline was cut off. When the
+script refuses, drop the largest off-topic source; do not retry the same list.
 
 ## 2. Profile
 
